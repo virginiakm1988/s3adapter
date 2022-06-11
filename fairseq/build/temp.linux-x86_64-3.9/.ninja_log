@@ -1,0 +1,10 @@
+# ninja log v5
+1	364	1624631730889027826	/home/virginiakm1988/fairseq/build/temp.linux-x86_64-3.9/fairseq/clib/libbleu/module.o	5755c06fcbc713f6
+1	769	1624631731292020451	/home/virginiakm1988/fairseq/build/temp.linux-x86_64-3.9/fairseq/clib/libbleu/libbleu.o	75151bac564434bb
+1	5720	1624631737174912788	/home/virginiakm1988/fairseq/build/temp.linux-x86_64-3.9/fairseq/data/data_utils_fast.o	1e50fa261c2c76aa
+0	6062	1624631743377799266	/home/virginiakm1988/fairseq/build/temp.linux-x86_64-3.9/fairseq/data/token_block_utils_fast.o	73d976d3c359be8c
+0	22054	1624631765585392828	/home/virginiakm1988/fairseq/build/temp.linux-x86_64-3.9/fairseq/clib/libbase/balanced_assignment.o	79ebc395938ab5a9
+0	17494	1624631783678061686	/home/virginiakm1988/fairseq/build/temp.linux-x86_64-3.9/fairseq/clib/libnat/edit_dist.o	e7b132e156f922a9
+2	5923	1624636072481060528	/home/virginiakm1988/fairseq/build/temp.linux-x86_64-3.9/fairseq/data/data_utils_fast.o	1e50fa261c2c76aa
+1	5877	1624636095128640690	/home/virginiakm1988/fairseq/build/temp.linux-x86_64-3.9/fairseq/data/data_utils_fast.o	1e50fa261c2c76aa
+1	5911	1624636101206528023	/home/virginiakm1988/fairseq/build/temp.linux-x86_64-3.9/fairseq/data/token_block_utils_fast.o	73d976d3c359be8c

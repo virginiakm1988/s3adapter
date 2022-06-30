@@ -1,6 +1,6 @@
 # s3adapter
 
-# Setting up adapters for s3prl 
+#### Setting up adapters for s3prl 
 In order to run s3prl with different adapters, you will need to modify 3 files
 
     fairseq/fairseq/models/wav2vec/wav2vec2.py

@@ -1045,7 +1045,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.dropout3(x)
 
             ###adapter
-            if 'adapter' in sys.argv[1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+            if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
                 x = x + residual +  self.adapter_vector  * self.adapter_alpha(adapter_input)
             elif 'houlsby' in sys.argv[-1]:
                 x = x + residual +  self.adapter(houlsby_input)

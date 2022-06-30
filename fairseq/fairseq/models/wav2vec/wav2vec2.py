@@ -981,7 +981,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         if 'adapter' in sys.argv[1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
             print('AdapterBias!!!')
             self.adapter_vector = nn.Parameter(torch.ones((768), requires_grad=True))
-            self.adapter_alpha = nn.Linear(ffn_embedding_dim, 1) #每個layer的xi都不一樣
+            self.adapter_alpha = nn.Linear(ffn_embedding_dim, 1) 
         elif 'houlsby' in sys.argv[-1]:
             print('Houlsby!!!')
             self.adapter = nn.Sequential(

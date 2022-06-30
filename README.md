@@ -1,6 +1,6 @@
 # s3adapter
 
-##Setting up adapters for s3prl 
+# Setting up adapters for s3prl 
 In order to run s3prl with different adapters, you will need to modify 3 files
 
     fairseq/fairseq/models/wav2vec/wav2vec2.py
@@ -16,7 +16,9 @@ The supported adapters includes
 * `houlsby` for Houlsby adapters (https://arxiv.org/abs/1902.00751)
 * `bitfit` for Bitfit method (https://arxiv.org/abs/2106.10199)
 * `lora` for LoRA (https://github.com/microsoft/LoRA)
+
+
 Simply tune the whole upstream model using the last hidden representation:
-'''
-run_downstream.py --adapter True -u hubert -d asr -m train -f -l -1 -n hubert_asr_finetune
-'''
+
+    run_downstream.py --adapter True -u hubert -d asr -m train -f -l -1 -n hubert_asr_finetune
+

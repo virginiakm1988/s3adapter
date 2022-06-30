@@ -9,7 +9,9 @@ In order to run s3prl with different adapters, you will need to modify 3 files
 
 After modifying the three files, you can start adapter-based tuning with the following command line:
 
-    run_downstream.py --adapter True -u hubert -d asr -m train -f -l -1 -n hubert_asr_adapter ## make sure the last sys.argv contains the keyword
+    run_downstream.py --adapter True -u hubert -d asr -m train -f -l -1 -n hubert_asr_adapter 
+
+make sure the last sys.argv contains the name of adapter
 
 The supported adapters includes
 *   `adapter` for AdapterBias (https://arxiv.org/abs/2205.00305)

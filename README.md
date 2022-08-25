@@ -1,11 +1,12 @@
 # s3adapter
 
 #### Setting up adapters for s3prl 
-In order to run s3prl with different adapters, you will need to modify 3 files
+1. Clone the newest s3prl repo first.
+2. In order to run s3prl with different adapters, you will need to modify 3 files within your installed s3prl_repo
 
-    fairseq/fairseq/models/wav2vec/wav2vec2.py
-    s3prl_adapter/downstream/runner.py
-    s3prl_adapter/run_downstream.py
+    fairseq/fairseq/models/wav2vec/wav2vec2.py ==> modify your fairseq/fairseq/models/wav2vec/wav2vec2.py
+    s3prl_adapter/downstream/runner.py ==> modify your ./s3prl/downstream/runner.py
+    s3prl_adapter/run_downstream.py    ==> modify your ./s3prl/run_downstream.py
 
 After modifying the three files, you can start adapter-based tuning with the following command line:
 

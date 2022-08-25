@@ -4,9 +4,22 @@
 1. Clone the newest s3prl repo first.
 2. In order to run s3prl with different adapters, you will need to modify 3 files within your installed s3prl_repo
 
-    fairseq/fairseq/models/wav2vec/wav2vec2.py ==> modify your fairseq/fairseq/models/wav2vec/wav2vec2.py
-    s3prl_adapter/downstream/runner.py ==> modify your ./s3prl/downstream/runner.py
-    s3prl_adapter/run_downstream.py    ==> modify your ./s3prl/run_downstream.py
+    ```
+    fairseq/fairseq/models/wav2vec/wav2vec2.py 
+    ```
+    > ==> modify your fairseq/fairseq/models/wav2vec/wav2vec2.py   
+    ```
+     s3prl_adapter/downstream/runner.py
+    ```
+    > ==> modify your ./s3prl/downstream/runner.py
+
+    ```
+
+    s3prl_adapter/run_downstream.py 
+
+    ```
+    > ==> modify your ./s3prl/run_downstream.py
+ 
 
 After modifying the three files, you can start adapter-based tuning with the following command line:
 
@@ -24,4 +37,3 @@ The supported adapters includes
 Simply tune the whole upstream model using the last hidden representation:
 
     run_downstream.py --adapter True -u hubert -d asr -m train -f -l -1 -n hubert_asr_finetune
-

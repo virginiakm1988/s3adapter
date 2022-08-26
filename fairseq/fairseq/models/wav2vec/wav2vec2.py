@@ -33,7 +33,11 @@ import loralib as lora
 EXTRACTOR_MODE_CHOICES = ChoiceEnum(["default", "layer_norm"])
 MASKING_DISTRIBUTION_CHOICES = ChoiceEnum(["static", "uniform", "normal", "poisson"])
 
-
+def str2bool(x):
+    if x.lower() == 'true':
+        return True
+    else:
+        return False
 @dataclass
 class Wav2Vec2Config(FairseqDataclass):
     extractor_mode: EXTRACTOR_MODE_CHOICES = field(
@@ -787,10 +791,10 @@ class ConvFeatureExtractionModel(nn.Module):
 
         in_d = 1
         self.conv_layers = nn.ModuleList()
+            
         for i, cl in enumerate(conv_layers):
             assert len(cl) == 3, "invalid conv definition: " + str(cl)
             (dim, k, stride) = cl
-
             self.conv_layers.append(
                 block(
                     in_d,
@@ -802,6 +806,19 @@ class ConvFeatureExtractionModel(nn.Module):
                     conv_bias=conv_bias,
                 )
             )
+        if "cnn" in sys.argv[-1]: 
+            self.conv_adapter_layers = nn.ModuleList()
+            self.conv_adapter_layers.append(
+                                block(
+                                    in_d,
+                                    dim,
+                                    k,
+                                    stride,
+                                    is_layer_norm=mode == "layer_norm",
+                                    is_group_norm=mode == "default" and i == 0,
+                                    conv_bias=conv_bias,
+                                )
+                            )
             in_d = dim
 
     def forward(self, x):
@@ -809,8 +826,14 @@ class ConvFeatureExtractionModel(nn.Module):
         # BxT -> BxCxT
         x = x.unsqueeze(1)
 
-        for conv in self.conv_layers:
-            x = conv(x)
+        ## add CNN adapter ###
+        for idx, conv in enumerate(self.conv_layers):
+            if "cnn" in sys.argv[-1]: 
+                #print(conv(x).shape,x.shape, cnn_adapter(x).shape)
+                cnn_adapter = self.conv_adapter_layers[idx]
+                x = conv(x)  + cnn_adapter(x) 
+            else:
+                x = conv(x)
 
         return x
 
@@ -837,6 +860,38 @@ class TransformerEncoder(nn.Module):
         self.pos_conv = nn.utils.weight_norm(self.pos_conv, name="weight", dim=2)
         self.pos_conv = nn.Sequential(self.pos_conv, SamePad(args.conv_pos), nn.GELU())
 
+
+
+
+        ##### Prompt
+        sys_args = {sys.argv[i]: sys.argv[i+1] for i in range(1, len(sys.argv)-1, 2)}
+        if '--prompt' not in sys_args: sys_args["--prompt"] = "None"
+        if '--prompt_len' not in sys_args: sys_args["--prompt_len"] = 10
+        if '--prompt_init' not in sys_args: sys_args["--prompt_init"] = "False"
+        if '--task' not in sys_args: sys_args["--task"] = "None"
+        if '--get_init' not in sys_args: sys_args["--get_init"] = "False"
+        
+        self.prompt_type = sys_args['--prompt']
+        self.prompt_len = int(sys_args['--prompt_len'])
+        self.prompt_init = str2bool(sys_args['--prompt_init'])
+        self.downstream_task = sys_args['--task']
+        self.get_init = str2bool(sys_args['--get_init'])
+        
+        if self.prompt_init:
+            print("Init Prompt !!!")
+        if sys_args['--prompt'] == "prefix" or sys_args['--prompt'] == "preinput":
+            print("Prefix tuning!")
+            emb_dim = 768
+            if self.prompt_init:
+                emb = torch.load(f'hubert_{self.downstream_task}_emb_weight/input.pt') # (768)
+                print(f"Load emb weight from hubert_{self.downstream_task}_emb_weight/input.pt")
+                emb = emb.view(1, 1, emb_dim).expand(-1, self.prompt_len, -1)
+                self.prompt_input = nn.Parameter(emb, requires_grad=True)
+            else:
+                self.prompt_input = nn.Parameter(torch.ones((1, self.prompt_len, emb_dim), requires_grad=True))
+
+        ##### end of prompt ############
+
         self.layers = nn.ModuleList(
             [
                 TransformerSentenceEncoderLayer(
@@ -860,6 +915,26 @@ class TransformerEncoder(nn.Module):
         self.apply(init_bert_params)
 
     def forward(self, x, padding_mask=None, layer=None):
+        #####  PROMPT CODE#################
+        # get the initialiazation of wav embedding
+        if "prefix" in sys.argv[-1]:
+            #print("YOURE RUNNING PREFIX settings!") 
+            if self.get_init:
+                print("Save input wav embedding!!")
+                init_emb = torch.mean(x, dim=(0, 1)).detach().cpu()
+                if not os.path.isdir(f'hubert_{self.downstream_task}_emb_weight'):
+                    os.mkdir(f'hubert_{self.downstream_task}_emb_weight')
+                torch.save(init_emb, os.path.join(f'hubert_{self.downstream_task}_emb_weight', f"input.pt"))
+            
+            if self.prompt_type == "prefix" or self.prompt_type == "preinput":
+                bs = x.shape[0]
+                temp_prompt = self.prompt_input.expand(bs, -1, -1)
+                x = torch.cat((temp_prompt, x), dim=1)
+            
+                if padding_mask is not None:
+                    prompt_padding_mask = torch.zeros((bs, self.prompt_len), dtype=torch.bool).cuda()
+                    padding_mask = torch.cat((prompt_padding_mask, padding_mask), dim=1)
+        ##### end of PROMPT CODE#################
         x, layer_results = self.extract_features(x, padding_mask, layer)
 
         if self.layer_norm_first and layer is None:
@@ -912,38 +987,6 @@ class TransformerEncoder(nn.Module):
         """Upgrade a (possibly old) state dict for new versions of fairseq."""
         return state_dict
 
-###################def by Allen###################
-class BertAdapter(nn.Module):
-    def __init__(self, inputdim, outputdim, bottleneck):
-        super().__init__()
-        self.outputdim = outputdim
-        self.inputdim = inputdim
-        self.bottle = bottleneck
-        
-        if 'alpha' in sys.argv[1]:
-            print('目前架構 ： Alpha !!!')
-            self.alpha = nn.Parameter(torch.ones(1, requires_grad=True))
-        elif 'xi' in sys.argv[1]:
-            print('目前架構 ： Xi !!!')
-            self.alpha = nn.Linear(self.inputdim, 1)
-        else:
-            print('目前架構 ： Error !!!')
-        self.model = nn.Sequential(
-            nn.Linear(self.inputdim, self.bottle),
-            nn.GELU(),
-            nn.Linear(self.bottle, self.outputdim),
-        )
-    def forward(self, x):
-        if 'alpha' in sys.argv[1]:
-            x = self.alpha * self.model(x)
-        elif 'xi' in sys.argv[1]:
-            y = self.alpha(x)
-            x = self.model(x)
-            x = y * x
-        elif 'mixed' in sys.argv[1]:
-            x = self.model(x)
-        return x
-###################def by Allen###################
 
 class TransformerSentenceEncoderLayer(nn.Module):
     """
@@ -978,7 +1021,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
             self_attention=True,
         )
         print(sys.argv[-1])
-        if 'adapter' in sys.argv[1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+        if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
             print('AdapterBias!!!')
             self.adapter_vector = nn.Parameter(torch.ones((768), requires_grad=True))
             self.adapter_alpha = nn.Linear(ffn_embedding_dim, 1) 
@@ -1007,6 +1050,27 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
         # layer norm associated with the position wise feed-forward NN
         self.final_layer_norm = LayerNorm(self.embedding_dim)
+
+        ####PREFIX CODE##################
+        if "prefix" in sys.argv[-1]:
+            print("PREFIX")
+            self.prompt_type = prompt_type
+            self.prompt_len = prompt_len
+            self.prompt_init = prompt_init
+            self.downstream_task = downstream_task
+            self.get_init = get_init
+
+            if self.prompt_type == "prefix":
+                print("Prefix tuning!")
+                emb_dim = 768
+                if self.prompt_init:
+                    emb = torch.load(f'hubert_{self.downstream_task}_emb_weight/layer{layer}.pt') # (768)
+                    print(f"Load embedding weight from hubert_{self.downstream_task}_emb_weight/layer{layer}.pt")
+                    emb = emb.view(1, 1, emb_dim).expand(self.prompt_len, -1, -1)
+                    self.prompt = nn.Parameter(emb, requires_grad=True)
+                else:
+                    self.prompt = nn.Parameter(torch.ones((self.prompt_len, 1, emb_dim), requires_grad=True))
+        ####PREFIX CODE##################
 
     def forward(
         self,
@@ -1074,7 +1138,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.dropout3(x)
             ###adapter
             
-            if 'adapter' in sys.argv[1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+            if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
                 x = x + residual +  self.adapter_vector  * self.adapter_alpha(adapter_input)
             elif 'houlsby' in sys.argv[-1]:
                 x = x + residual +  self.adapter(houlsby_input)

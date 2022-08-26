@@ -1,6 +1,0 @@
-audio_root: /groups/public/common-voice-en/en/clips
-bpe_tokenizer:
-  bpe: sentencepiece
-  sentencepiece_model: /home/virginiakm1988/s3prl/s3prl/data/covost_en_de/spm-tgt_text.model
-use_audio_input: true
-vocab_filename: spm-tgt_text.txt

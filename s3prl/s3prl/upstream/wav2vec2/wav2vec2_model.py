@@ -9,6 +9,7 @@ import sys
 import math
 import uuid
 import logging
+import loralib as lora
 from enum import Enum, EnumMeta
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Callable, Dict
@@ -840,12 +841,23 @@ class MultiheadAttention(nn.Module):
             "Self-attention requires query, key and " "value to be of the same size"
         )
 
-        self.k_proj = quant_noise(
-            nn.Linear(self.kdim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
-        self.v_proj = quant_noise(
-            nn.Linear(self.vdim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
+
+        ####LoRA####
+        if 'lora' in sys.argv[-1]:
+            self.k_proj = quant_noise(
+                lora.Linear(self.kdim, embed_dim, r=8), q_noise, qn_block_size
+            )
+
+            self.q_proj = quant_noise(
+                lora.Linear(embed_dim, embed_dim, r=8), q_noise, qn_block_size
+            )
+        else:
+            self.k_proj = quant_noise(
+                nn.Linear(self.kdim, embed_dim, bias=bias), q_noise, qn_block_size
+            )
+            self.v_proj = quant_noise(
+                nn.Linear(self.vdim, embed_dim, bias=bias), q_noise, qn_block_size
+            )
         self.q_proj = quant_noise(
             nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
         )

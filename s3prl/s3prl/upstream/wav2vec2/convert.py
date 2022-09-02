@@ -34,7 +34,7 @@ def load_converted_model(ckpt: str):
     task_cfg = merge_with_parent(AudioPretrainingConfig, ckpt_state["task_cfg"])
     model_cfg = merge_with_parent(Wav2Vec2Config, ckpt_state["model_cfg"])
     model = Wav2Vec2Model(model_cfg)
-    model.load_state_dict(ckpt_state["model_weight"])
+    model.load_state_dict(ckpt_state["model_weight"], strict=False)
     return model, task_cfg
 
 

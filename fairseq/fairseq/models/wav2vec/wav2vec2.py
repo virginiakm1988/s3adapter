@@ -32,7 +32,7 @@ import loralib as lora
 
 EXTRACTOR_MODE_CHOICES = ChoiceEnum(["default", "layer_norm"])
 MASKING_DISTRIBUTION_CHOICES = ChoiceEnum(["static", "uniform", "normal", "poisson"])
-
+print(sys.argv[-1])
 def str2bool(x):
     if x.lower() == 'true':
         return True
@@ -747,6 +747,7 @@ class ConvFeatureExtractionModel(nn.Module):
         conv_bias: bool = False,
     ):
         super().__init__()
+        print("hi, youre in conv blcok")
 
         assert mode in {"default", "layer_norm"}
 
@@ -807,6 +808,7 @@ class ConvFeatureExtractionModel(nn.Module):
                 )
             )
         if "cnn" in sys.argv[-1]: 
+            print("CNN adapters!")
             self.conv_adapter_layers = nn.ModuleList()
             self.conv_adapter_layers.append(
                                 block(
@@ -841,6 +843,7 @@ class ConvFeatureExtractionModel(nn.Module):
 class TransformerEncoder(nn.Module):
     def __init__(self, args):
         super().__init__()
+        print("Hello, youre in transformer encoder block")
 
         self.dropout = args.dropout
         self.embedding_dim = args.encoder_embed_dim

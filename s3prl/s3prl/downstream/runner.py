@@ -24,6 +24,9 @@ from s3prl.schedulers import get_scheduler
 from s3prl.upstream.interfaces import Featurizer
 from s3prl.utility.helper import is_leader_process, get_model_state, show, defaultdict
 
+####add prompt optimizer (for setting different lr for prompt)#######
+from s3prl.prompt_optimizers import  get_prompt_optimizer
+
 from huggingface_hub import HfApi, HfFolder, Repository
 
 SAMPLE_RATE = 16000
@@ -101,6 +104,24 @@ class Runner():
         if init_weight:
             show(f'[Runner] - Loading {name} weights from the previous experiment')
             model.load_state_dict(init_weight)
+        
+                # load prompt weight
+        if name == "Upstream":
+            if "prefix" in sys.argv[-1]:
+                prompt_weight = self.init_ckpt.get("prompt")
+                if prompt_weight:
+                    show(f'[Runner] - Loading {"Prompt"} weights from the previous experiment')
+                    model_dict = model.state_dict()
+                    model_dict.update(prompt_weight)
+                    model.load_state_dict(model_dict)
+            if self.args.adapter:
+                adapter_weight = self.init_ckpt.get("adapter")
+                if adapter_weight:
+                    show(f'[Runner] - Loading {"Adapter"} weights from the previous experiment')
+                    model_dict = model.state_dict()
+                    model_dict.update(adapter_weight)
+                    model.load_state_dict(model_dict)
+
 
 
     def _init_model(self, model, name, trainable, interfaces=None):
@@ -198,13 +219,28 @@ class Runner():
             interfaces = ['get_dataloader', 'log_records']
         )
 
-
-    def _get_optimizer(self, model_params):
-        optimizer = get_optimizer(
+    ### add prompt
+    def _get_optimizer(self, model_params,prompt_lst):
+        if "prefix" in sys.argv[-1]:
+            optimizer = get_prompt_optimizer(
             model_params, 
+            prompt_lst, ###
             self.config['runner']['total_steps'],
             self.config['optimizer']
-        )
+            )
+        elif self.args.adapter:
+            optimizer = get_prompt_optimizer(
+            model_params, 
+            prompt_lst, ###
+            self.config['runner']['total_steps'],
+            self.config['optimizer']
+            )
+        else:
+            optimizer = get_optimizer(
+                model_params, 
+                self.config['runner']['total_steps'],
+                self.config['optimizer']
+            )
         self._load_weight(optimizer, 'Optimizer')
         return optimizer
 
@@ -228,7 +264,31 @@ class Runner():
         # trainable parameters and train/eval mode
         trainable_models = []
         trainable_paras = []
+        additional_weight = [] # add prompt paras to optimizer
         for entry in self.all_entries:
+            
+            #### add the weight of prefix ###############
+            if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream":
+                for  name, param in entry.model.named_parameters():
+                    if "prompt" in name:
+                        additional_weight.append(param)
+                        param.requires_grad = True
+                        print("Prompt!!",name)
+                trainable_paras += list(additional_weight)
+
+            #### add adapters ##################
+            if self.args.adapter != False and entry.name == "Upstream":
+                for  name, param in entry.model.named_parameters():
+                        if "adapter" in name or 'lora' in name:
+                            additional_weight.append(param)
+                            param.requires_grad = True
+                            print("Adapter!!",name)
+                        else:
+                            param.requires_grad = False
+                    
+                trainable_paras += list(additional_weight)
+
+
             if entry.trainable:
                 entry.model.train()
                 trainable_models.append(entry.model)
@@ -237,7 +297,7 @@ class Runner():
                 entry.model.eval()
 
         # optimizer
-        optimizer = self._get_optimizer(trainable_models)
+        optimizer = self._get_optimizer(trainable_models,[])
 
         # scheduler
         scheduler = None
@@ -386,6 +446,22 @@ class Runner():
                     for entry in self.all_entries:
                         if entry.trainable:
                             all_states[entry.name] = get_model_state(entry.model)
+
+                        if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream": ###
+                                prompt_state = {}
+                                for name, param in entry.model.named_parameters():
+                                    if "prompt" in name:
+                                        prompt_state[name] = param
+                                all_states["prompt"] = prompt_state
+                        if self.args.adapter and entry.name == "Upstream": ###
+                                adapter_state = {}
+                                for name, param in entry.model.named_parameters():
+                                    if "adapter" in name:
+                                        adapter_state[name] = param
+                                    if self.args.adapter == "bitfit":
+                                        if "bias" in name:
+                                            adapter_state[name] = param
+                                all_states["adapter"] = adapter_state
 
                     if scheduler:
                         all_states['Scheduler'] = scheduler.state_dict()

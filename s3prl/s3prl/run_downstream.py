@@ -57,6 +57,7 @@ def get_downstream_args():
     parser.add_argument('--hub', default="torch", choices=["torch", "huggingface"],
         help='The model Hub used to retrieve the upstream model.')
 
+    print("dir of hub", dir(hub))
     upstreams = [attr for attr in dir(hub) if attr[0] != '_']
     parser.add_argument('-u', '--upstream',  help=""
         'Upstreams with \"_local\" or \"_url\" postfix need local ckpt (-k) or config file (-g). '

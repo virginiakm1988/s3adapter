@@ -11,7 +11,7 @@ from s3prl.upstream.distiller.hubconf import *
 from s3prl.upstream.example.hubconf import *
 from s3prl.upstream.hubert.hubconf import *
 # from s3prl.upstream.lighthubert.hubconf import *  # FIXME: (Leo)
-from s3prl.upstream.log_stft.hubconf import *
+#from s3prl.upstream.log_stft.hubconf import *
 from s3prl.upstream.mockingjay.hubconf import *
 from s3prl.upstream.mos_prediction.hubconf import *
 from s3prl.upstream.npc.hubconf import *

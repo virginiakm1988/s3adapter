@@ -861,7 +861,7 @@ class TransformerEncoder(nn.Module):
         self.pos_conv = nn.Sequential(self.pos_conv, SamePad(args.conv_pos), nn.GELU())
 
 
-
+        print("youre in transformerencoder block")
 
         ##### Prompt
         sys_args = {sys.argv[i]: sys.argv[i+1] for i in range(1, len(sys.argv)-1, 2)}

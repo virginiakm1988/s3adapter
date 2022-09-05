@@ -1,40 +1,27 @@
 # s3adapter
-## NEW VERSION
+## Setting up
 1. directly clone this repo
-2. pip install huggingface-hub
-3. cd ../s3prl, pip install -e .
-4. You should be able to run s3prl with adapter version!
+2. cd ./s3adapter/s3prl
+```
+pip install -e .
+```
+4. pip install necessary packages
+```
+pip install huggingface-hub
+pip install editdistance
+pip install loralib
+pip install tensorboardX
+```
+5. You should be able to run s3prl with adapter version!
 
 
-#### Setting up adapters for s3prl 
-1. Clone the newest s3prl repo first.
-2. pip install editdistance
-3. pip install loralib
-4. pip install tensorboardX
-4. In order to run s3prl with different adapters, you will need to modify 3 files within your installed s3prl_repo
-
-    ```
-    fairseq/fairseq/models/wav2vec/wav2vec2.py 
-    ```
-    > ==> modify your fairseq/fairseq/models/wav2vec/wav2vec2.py   
-    ```
-     s3prl_adapter/downstream/runner.py
-    ```
-    > ==> modify your ./s3prl/downstream/runner.py
-
-    ```
-
-    s3prl_adapter/run_downstream.py 
-
-    ```
-    > ==> modify your ./s3prl/run_downstream.py
- 
+## Starting adapter-based tuning
 
 After modifying the three files, you can start adapter-based tuning with the following command line:
 
-    run_downstream.py --adapter True -u hubert -d asr -m train -f -l -1 -n hubert_asr_adapter 
+    run_downstream.py --adapter houlsby -u hubert -d asr -m train -f -n hubert_asr_houlsby 
 
-make sure the last sys.argv contains the name of adapter
+make sure the last sys.argv contains the name of adapter, and -f is set to True
 
 The supported adapters includes
 *   `adapter` for AdapterBias (https://arxiv.org/abs/2205.00305)
@@ -45,4 +32,4 @@ The supported adapters includes
 
 Simply tune the whole upstream model using the last hidden representation:
 
-    run_downstream.py --adapter True -u hubert -d asr -m train -f -l -1 -n hubert_asr_finetune
+    run_downstream.py  -u hubert -d asr -m train -f -l -1 -n hubert_asr_finetune

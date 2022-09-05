@@ -228,13 +228,6 @@ class Runner():
             self.config['runner']['total_steps'],
             self.config['optimizer']
             )
-        elif self.args.adapter:
-            optimizer = get_prompt_optimizer(
-            model_params, 
-            prompt_lst, ###
-            self.config['runner']['total_steps'],
-            self.config['optimizer']
-            )
         else:
             optimizer = get_optimizer(
                 model_params, 

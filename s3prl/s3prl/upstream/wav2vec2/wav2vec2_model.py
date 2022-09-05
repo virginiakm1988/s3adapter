@@ -855,12 +855,13 @@ class MultiheadAttention(nn.Module):
             self.k_proj = quant_noise(
                 nn.Linear(self.kdim, embed_dim, bias=bias), q_noise, qn_block_size
             )
-            self.v_proj = quant_noise(
+            
+            self.q_proj = quant_noise(
+                nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
+            )
+        self.v_proj = quant_noise(
                 nn.Linear(self.vdim, embed_dim, bias=bias), q_noise, qn_block_size
             )
-        self.q_proj = quant_noise(
-            nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
 
         self.out_proj = quant_noise(
             nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
@@ -3361,7 +3362,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             x = self.dropout3(x)
 
-            if 'adapter' in sys.argv[1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+            if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
                 x = x + residual +  self.adapter_vector  * self.adapter_alpha(adapter_input)
             elif 'houlsby' in sys.argv[-1]:
                 x = x + residual +  self.adapter(houlsby_input)

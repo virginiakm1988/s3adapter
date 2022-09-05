@@ -33,3 +33,9 @@ The supported adapters includes
 Simply tune the whole upstream model using the last hidden representation:
 
     run_downstream.py  -u hubert -d asr -m train -f -l -1 -n hubert_asr_finetune
+
+## modified files
+1. s3prl/s3prl/run_downstream.py (add adapter option parser)
+2. s3prl/s3prl/upstream/wav2vec2/wav2vec2_model.py (add adapter to upstream modules)
+3. s3prl/s3prl/upstream/wav2vec2/expert.py (set load_state_dict strict=False to enable the model to load the pretrained checkpoint)
+4. s3prl/s3prl/downstream/runner.py (set require_grad = True for the adapter parameters, and freeze the remaining parameters )

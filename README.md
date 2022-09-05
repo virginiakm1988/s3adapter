@@ -1,7 +1,7 @@
 # s3adapter
 ## NEW VERSION
 1. directly clone this repo
-2. cd fairseq, pip install -e .
+2. pip install huggingface-hub
 3. cd ../s3prl, pip install -e .
 4. You should be able to run s3prl with adapter version!
 
@@ -10,6 +10,7 @@
 1. Clone the newest s3prl repo first.
 2. pip install editdistance
 3. pip install loralib
+4. pip install tensorboardX
 4. In order to run s3prl with different adapters, you will need to modify 3 files within your installed s3prl_repo
 
     ```

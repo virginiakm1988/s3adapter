@@ -20,6 +20,7 @@ import pandas as pd
 from tqdm import tqdm
 from pathlib import Path
 from joblib import Parallel, delayed
+sys.path.append('../')
 from utility.audio import extract_feature, num_mels, num_mfcc, num_freq
 
 
@@ -101,7 +102,7 @@ def main():
 
     # Select data sets
     print('Data sets :')
-    sets = ['train-clean-100', 'train-clean-360', 'train-other-500', 'dev-clean', 'dev-other', 'test-clean', 'test-other']
+    sets = ['train-clean-100', 'dev-clean', 'dev-other', 'test-clean', 'test-other']
     for idx, s in enumerate(sets):
         print('\t', idx, ':', s)
     tr_set = input('Please enter the index of splits you wish to use preprocess. (seperate with space): ')

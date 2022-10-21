@@ -61,6 +61,7 @@ class SequenceDataset(Dataset):
         table_list = table_list.sort_values(by=['length'], ascending=False)
 
         X = table_list['file_path'].tolist()
+        print('dataset 64', table_list['file_path'])
         X_lens = table_list['length'].tolist()
 
         assert len(X) != 0, f"0 data found for {split}"
@@ -111,6 +112,7 @@ class SequenceDataset(Dataset):
     def _load_wav(self, wav_path):
         wav, sr = torchaudio.load(os.path.join(self.libri_root, wav_path))
         assert sr == self.sample_rate, f'Sample rate mismatch: real {sr}, config {self.sample_rate}'
+        print(f'asr dataset 114 {wav.shape}')
         return wav.view(-1)
 
     def _load_transcript(self, x_list):
@@ -162,4 +164,5 @@ class SequenceDataset(Dataset):
 
     def collate_fn(self, items):
         assert len(items) == 1
+        print(f'asr dataset 166 {items}')
         return items[0][0], items[0][1], items[0][2] # hack bucketing, return (wavs, labels, filenames)

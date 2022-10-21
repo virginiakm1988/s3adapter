@@ -119,6 +119,7 @@ class DownstreamExpert(nn.Module):
         """
         if not hasattr(self, f'{split}_dataset'):
             batch_size = self.datarc['batch_size'] if split == "train" else self.datarc['eval_batch_size']
+            # print(f"down/asr/expert 122 {batch_size}")
             setattr(self, f'{split}_dataset', SequenceDataset(split, batch_size, self.dictionary, **self.datarc))
 
         if split == 'train':

@@ -336,7 +336,7 @@ class Runner():
                     if pbar.n >= pbar.total:
                         break
                     global_step = pbar.n + 1
-
+                    # print(f'downstream runner 325 {wavs[0].shape}, {len(wavs)}')
                     wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
                     if self.upstream.trainable:
                         features = self.upstream.model(wavs)

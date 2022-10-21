@@ -1,3 +1,4 @@
+from cProfile import run
 import os
 import yaml
 import glob
@@ -156,6 +157,7 @@ def get_downstream_args():
         os.makedirs(args.expdir, exist_ok=True)
 
         if args.config is None:
+            print("150 No config!")
             args.config = f'./downstream/{args.downstream}/config.yaml'
         with open(args.config, 'r') as file:
             config = yaml.load(file, Loader=yaml.FullLoader)
@@ -230,6 +232,7 @@ def main():
         torch.backends.cudnn.benchmark = False
 
     runner = Runner(args, config)
+    # print('234', runner.config)
     eval(f'runner.{args.mode}')()
 
 

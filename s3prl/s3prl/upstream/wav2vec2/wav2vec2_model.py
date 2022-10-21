@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from ..adapterModels import AdapterSwitch
 
 logger = logging.getLogger(__name__)
 
@@ -3233,6 +3234,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         activation_dropout: float = 0.1,
         activation_fn: str = "relu",
         layer_norm_first: bool = False,
+        switch_used: bool = False,
     ) -> None:
 
         super().__init__()
@@ -3250,6 +3252,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
             self_attention=True,
         )
 
+        # print('3254', sys.argv)
         if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
             print('AdapterBias!!!')
             self.adapter_vector = nn.Parameter(torch.ones((768), requires_grad=True))
@@ -3280,7 +3283,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
         # layer norm associated with the position wise feed-forward NN
         self.final_layer_norm = LayerNorm(self.embedding_dim)
-
+        self.switch = AdapterSwitch()
     def forward(
         self,
         x: torch.Tensor,
@@ -3294,7 +3297,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         modules similar to the original Transformer imlementation.
         """
         residual = x
-
+        # print('3298', residual.shape)
         if self.layer_norm_first:
             x = self.self_attn_layer_norm(x)
             x, attn = self.self_attn(
@@ -3327,13 +3330,19 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             x = self.dropout3(x)
 
+            adapter_output = None
             if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
-                x = x + residual +  self.adapter_vector  * self.adapter_alpha(adapter_input)
+                adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
+                x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
             elif 'houlsby' in sys.argv[-1]:
-                x = x + residual +  self.adapter(houlsby_input)
+                adapter_output = self.adapter(houlsby_input)
+                x = x + residual # +  self.adapter(houlsby_input)
             else:
                 x = x + residual
             
+            if adapter_output is not None:
+                adapterStack = torch.stack([x, adapter_output], -2)
+                x = self.switch(adapterStack)
         else:
             x, attn = self.self_attn(
                 query=x,
@@ -3362,12 +3371,19 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             x = self.dropout3(x)
 
+            adapter_output = None
             if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
-                x = x + residual +  self.adapter_vector  * self.adapter_alpha(adapter_input)
+                adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
+                x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
             elif 'houlsby' in sys.argv[-1]:
-                x = x + residual +  self.adapter(houlsby_input)
+                adapter_output = self.adapter(houlsby_input)
+                x = x + residual # +  self.adapter(houlsby_input)
             else:
                 x = x + residual
+            
+            if adapter_output is not None:
+                adapterStack = torch.stack([x, adapter_output], -2)
+                x = self.switch(adapterStack)
             x = self.final_layer_norm(x)
 
         return x, (attn, layer_result)

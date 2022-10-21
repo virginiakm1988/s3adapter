@@ -131,6 +131,9 @@ class SequenceDataset(Dataset):
             parts = dir.split('/')
             trans_path = f"{parts[-2]}-{parts[-1]}.trans.txt"
             path = os.path.join(self.libri_root, dir, trans_path)
+            # cmt
+            # print('133', path, trans_path)
+            if(trans_path.find('raw') >= 0): continue
             assert os.path.exists(path)
 
             with open(path, "r") as trans_f:

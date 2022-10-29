@@ -419,27 +419,34 @@ class AdapterSwitch(nn.Module):
     fixed: int = None
 
     fixed_idx: int = None
-
+    
+    hard: bool = False
+    
     def __init__(
         self,
         config: Namespace=Namespace(temperature=1.0, strategy='global'),
-        initial_logits: List[float] = [0.5, 0.5]
+        initial_logits: List[float] = None,
+        num_paths: int = 3
     ):
         super().__init__()
 
         self.config = config
 
         # Keep the logits of probabilities as a separate parameters.
-        self.register_parameter(
-            'switch_logits', nn.Parameter(torch.tensor(initial_logits))
-        )
+        
 
         self.switch_temperature = torch.tensor([self.config.temperature])
 
         # Distribution used.
         self.gumbel = torch.distributions.Gumbel(0, 1)
         self.training = True
-
+        self.paths = num_paths
+        initial_logits = ([1. / num_paths] * num_paths if initial_logits is None else initial_logits)
+        self.register_parameter(
+                    'switch_logits', nn.Parameter(torch.tensor(initial_logits))
+                )
+        
+        print(f"paths = {len(initial_logits)}")
     @property
     def probs(self):
         return torch.softmax(self.switch_logits, dim=-1)
@@ -481,7 +488,7 @@ class AdapterSwitch(nn.Module):
         # Compute the weights of the convex sum.
         weights = torch.softmax((g + self.switch_logits) / self.switch_temperature[0], dim=-1)
         # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
-        if not self.training:
+        if self.hard:
             y_hard = Gumbel.onehot_from_logits(weights)
             #print(y_hard[0], "random")
             weights = (y_hard - weights).detach() + weights

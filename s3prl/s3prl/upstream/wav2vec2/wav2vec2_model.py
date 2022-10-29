@@ -3283,7 +3283,12 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
         # layer norm associated with the position wise feed-forward NN
         self.final_layer_norm = LayerNorm(self.embedding_dim)
-        self.switch = AdapterSwitch()
+        self.nas_ops = 3
+        try:
+            self.nas_ops = int(sys.argv[-1].split("_")[-1])
+        except:
+            pass
+        self.switch = AdapterSwitch(num_paths=self.nas_ops)
     def forward(
         self,
         x: torch.Tensor,
@@ -3297,6 +3302,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         modules similar to the original Transformer imlementation.
         """
         residual = x
+        adapter_output = parallel_output = None
         # print('3298', residual.shape)
         if self.layer_norm_first:
             x = self.self_attn_layer_norm(x)
@@ -3330,18 +3336,20 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             x = self.dropout3(x)
 
-            adapter_output = None
+            
             if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
                 adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
                 x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
+                parallel_output = self.adapter_vector * self.adapter_alpha(residual)
             elif 'houlsby' in sys.argv[-1]:
                 adapter_output = self.adapter(houlsby_input)
                 x = x + residual # +  self.adapter(houlsby_input)
+                parallel_output = self.adapter(residual)
             else:
                 x = x + residual
             
             if adapter_output is not None:
-                adapterStack = torch.stack([x, adapter_output], -2)
+                adapterStack = torch.stack([x, adapter_output, parallel_output][:self.nas_ops], -2)
                 x = self.switch(adapterStack)
         else:
             x, attn = self.self_attn(
@@ -3371,18 +3379,19 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             x = self.dropout3(x)
 
-            adapter_output = None
             if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
                 adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
                 x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
+                parallel_output = self.adapter_vector * self.adapter_alpha(residual)
             elif 'houlsby' in sys.argv[-1]:
                 adapter_output = self.adapter(houlsby_input)
                 x = x + residual # +  self.adapter(houlsby_input)
+                parallel_output = self.adapter(residual)
             else:
                 x = x + residual
             
             if adapter_output is not None:
-                adapterStack = torch.stack([x, adapter_output], -2)
+                adapterStack = torch.stack([x, adapter_output, parallel_output][:self.nas_ops], -2)
                 x = self.switch(adapterStack)
             x = self.final_layer_norm(x)
 

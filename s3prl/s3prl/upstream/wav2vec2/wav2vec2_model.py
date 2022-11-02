@@ -5,7 +5,7 @@
 
 # S3PRL has no contribution to this file
 # The file was copied from fairseq to remove the dependency on the entire fairseq package
-
+import sys
 import math
 import uuid
 import logging
@@ -2911,6 +2911,8 @@ class ConvFeatureExtractionModel(nn.Module):
 
         in_d = 1
         self.conv_layers = nn.ModuleList()
+        if "cnn" in sys.argv[-1]: 
+            self.conv_adapter_layers = nn.ModuleList()
         for i, cl in enumerate(conv_layers):
             assert len(cl) == 3, "invalid conv definition: " + str(cl)
             (dim, k, stride) = cl
@@ -2928,13 +2930,35 @@ class ConvFeatureExtractionModel(nn.Module):
             )
             in_d = dim
 
+            if "cnn" in sys.argv[-1]: 
+                self.conv_adapter_layers.append(
+                                block(
+                                    in_d,
+                                    dim,
+                                    k,
+                                    stride,
+                                    is_layer_norm=mode == "layer_norm",
+                                    is_group_norm=mode == "default" and i == 0,
+                                    conv_bias=conv_bias,
+                                    is_adapter=True
+                                )
+                            )
+
+
     def forward(self, x):
 
         # BxT -> BxCxT
         x = x.unsqueeze(1)
 
-        for conv in self.conv_layers:
-            x = conv(x)
+        # for conv in self.conv_layers:
+        #     x = conv(x)
+        
+        for idx, conv in enumerate(self.conv_layers):
+            if "cnn" in sys.argv[-1]: 
+                cnn_adapter = self.conv_adapter_layers[idx]
+                x = conv(x)  + 0.01*cnn_adapter(x) 
+            else:
+                x = conv(x)
 
         return x
 

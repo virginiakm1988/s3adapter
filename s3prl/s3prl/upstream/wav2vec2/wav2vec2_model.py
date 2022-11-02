@@ -9,6 +9,7 @@ import sys
 import math
 import uuid
 import logging
+import loralib as lora
 from enum import Enum, EnumMeta
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Callable, Dict
@@ -840,15 +841,27 @@ class MultiheadAttention(nn.Module):
             "Self-attention requires query, key and " "value to be of the same size"
         )
 
-        self.k_proj = quant_noise(
-            nn.Linear(self.kdim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
+
+        ####LoRA####
+        if 'lora' in sys.argv[-1]:
+            self.k_proj = quant_noise(
+                lora.Linear(self.kdim, embed_dim, r=8), q_noise, qn_block_size
+            )
+
+            self.q_proj = quant_noise(
+                lora.Linear(embed_dim, embed_dim, r=8), q_noise, qn_block_size
+            )
+        else:
+            self.k_proj = quant_noise(
+                nn.Linear(self.kdim, embed_dim, bias=bias), q_noise, qn_block_size
+            )
+            
+            self.q_proj = quant_noise(
+                nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
+            )
         self.v_proj = quant_noise(
-            nn.Linear(self.vdim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
-        self.q_proj = quant_noise(
-            nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
-        )
+                nn.Linear(self.vdim, embed_dim, bias=bias), q_noise, qn_block_size
+            )
 
         self.out_proj = quant_noise(
             nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
@@ -3261,6 +3274,23 @@ class TransformerSentenceEncoderLayer(nn.Module):
             self_attention=True,
         )
 
+        if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+            print('AdapterBias!!!')
+            self.adapter_vector = nn.Parameter(torch.ones((768), requires_grad=True))
+            self.adapter_alpha = nn.Linear(ffn_embedding_dim, 1) #每個layer的xi都不一樣
+        elif 'houlsby' in sys.argv[-1]:
+            print('Houlsby!!!')
+            self.adapter = nn.Sequential(
+                nn.Linear(self.embedding_dim, 32),
+                nn.GELU(),
+                nn.Linear(32, self.embedding_dim),
+            )
+        elif 'lora' in sys.argv[-1]:
+            print('LoRA!!!')
+        else:
+            print('Original Hubert!!!')
+
+
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(self.activation_dropout)
         self.dropout3 = nn.Dropout(dropout)
@@ -3305,13 +3335,29 @@ class TransformerSentenceEncoderLayer(nn.Module):
             residual = x
             x = self.final_layer_norm(x)
             x = self.activation_fn(self.fc1(x))
+
+            #add adapter input
+            if 'adapter' in sys.argv[-1]:
+                adapter_input = x
+
             x = self.dropout2(x)
             x = self.fc2(x)
+
+            #add adapter input
+            if 'houlsby_input' in sys.argv[-1]:
+                houlsby_input = x
 
             layer_result = x
 
             x = self.dropout3(x)
-            x = residual + x
+
+            if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+                x = x + residual +  self.adapter_vector  * self.adapter_alpha(adapter_input)
+            elif 'houlsby' in sys.argv[-1]:
+                x = x + residual +  self.adapter(houlsby_input)
+            else:
+                x = x + residual
+            
         else:
             x, attn = self.self_attn(
                 query=x,
@@ -3328,13 +3374,24 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             residual = x
             x = self.activation_fn(self.fc1(x))
+            #
+            adapter_input = x
+            #
             x = self.dropout2(x)
             x = self.fc2(x)
-
+            #
+            houlsby_input = x
+            #
             layer_result = x
 
             x = self.dropout3(x)
-            x = residual + x
+
+            if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+                x = x + residual +  self.adapter_vector  * self.adapter_alpha(adapter_input)
+            elif 'houlsby' in sys.argv[-1]:
+                x = x + residual +  self.adapter(houlsby_input)
+            else:
+                x = x + residual
             x = self.final_layer_norm(x)
 
         return x, (attn, layer_result)

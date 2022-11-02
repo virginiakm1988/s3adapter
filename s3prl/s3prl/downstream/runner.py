@@ -24,6 +24,9 @@ from s3prl.schedulers import get_scheduler
 from s3prl.upstream.interfaces import Featurizer
 from s3prl.utility.helper import is_leader_process, get_model_state, show, defaultdict
 
+####add prompt optimizer (for setting different lr for prompt)#######
+from s3prl.prompt_optimizers import  get_prompt_optimizer
+
 from huggingface_hub import HfApi, HfFolder, Repository
 
 SAMPLE_RATE = 16000
@@ -219,13 +222,6 @@ class Runner():
     ### add prompt
     def _get_optimizer(self, model_params,prompt_lst):
         if "prefix" in sys.argv[-1]:
-            optimizer = get_prompt_optimizer(
-            model_params, 
-            prompt_lst, ###
-            self.config['runner']['total_steps'],
-            self.config['optimizer']
-            )
-        elif self.args.adapter:
             optimizer = get_prompt_optimizer(
             model_params, 
             prompt_lst, ###

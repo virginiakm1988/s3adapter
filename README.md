@@ -28,7 +28,13 @@ The supported adapters includes
 * `houlsby` for Houlsby adapters (https://arxiv.org/abs/1902.00751)
 * `bitfit` for Bitfit method (https://arxiv.org/abs/2106.10199)
 * `lora` for LoRA (https://github.com/microsoft/LoRA)
+* `cnn ` for CNN adapters (One can add cnn adapters & houlsby adapters at the same time by specifying name in sys.argv[-1] )
 
+for example:
+    
+    run_downstream.py --adapter houlsby -u hubert -d asr -m train -f -n hubert_asr_houlsby_cnn
+    
+means using houlsby and cnn adapters at the same time.
 
 Simply tune the whole upstream model using the last hidden representation:
 

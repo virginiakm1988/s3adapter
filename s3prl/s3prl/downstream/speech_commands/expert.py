@@ -152,7 +152,7 @@ class DownstreamExpert(nn.Module):
 
 def split_dataset(
     root_dir: Union[str, Path], max_uttr_per_class=2 ** 27 - 1
-) -> Tuple[Dict[List[Tuple[str, str]]], List[Tuple[str, str]]]:
+) -> Tuple[Dict[str, List[Tuple[str, str]]], List[Tuple[str, str]]]:
     """Split Speech Commands into 3 set.
     
     Args:

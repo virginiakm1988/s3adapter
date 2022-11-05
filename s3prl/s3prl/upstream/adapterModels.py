@@ -474,7 +474,7 @@ class AdapterSwitch(nn.Module):
     def forward(self, x):
         x = x.transpose(0, 1)
         batch_size, seq_length, num_classes, hidden_dim_size = x.size()
-        print('477', self.switch_logits)
+        # print('477', self.switch_logits)
         if not self.training:
             return x[:,:, self.fixed_idx, :].transpose(0, 1)
 

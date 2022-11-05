@@ -255,74 +255,88 @@ class Runner():
 
     def train(self):
         # trainable parameters and train/eval mode
-        for adapterMode in ['train', 'switch']:
-            trainable_models = []
-            trainable_paras = []
-            additional_weight = [] # add prompt paras to optimizer
-            for entry in self.all_entries:
-                
-                #### add the weight of prefix ###############
-                if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream":
-                    for  name, param in entry.model.named_parameters():
-                        if "prompt" in name:
-                            additional_weight.append(param)
+        
+        trainable_models = []
+        trainable_paras = []
+        additional_weight = [] # add prompt paras to optimizer
+        for entry in self.all_entries:
+            
+            #### add the weight of prefix ###############
+            if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream":
+                for  name, param in entry.model.named_parameters():
+                    if "prompt" in name:
+                        additional_weight.append(param)
+                        param.requires_grad = True
+                        print("Prompt!!",name)
+                trainable_paras += list(additional_weight)
+
+            if entry.trainable:
+                entry.model.train()
+
+            #### add adapters ##################
+            if self.args.adapter != False and entry.name == "Upstream":
+                for  name, param in entry.model.named_parameters():
+                        if "adapter" in name or 'lora' in name:
+                            
                             param.requires_grad = True
-                            print("Prompt!!",name)
-                    trainable_paras += list(additional_weight)
-
-                #### add adapters ##################
-                if self.args.adapter != False and entry.name == "Upstream":
-                    for  name, param in entry.model.named_parameters():
-                            if "adapter" in name or 'lora' in name:
-                                
-                                param.requires_grad = ("switch" in name) ^ (adapterMode == "train")
-                                if param.requires_grad:
-                                    additional_weight.append(param)
-                                print("Adapter!!", name)
-                            else:
-                                param.requires_grad = False
-                        
-                    trainable_paras += list(additional_weight)
+                            if param.requires_grad:
+                                additional_weight.append(param)
+                            # print("Adapter!!", name, param.requires_grad)
+                        else:
+                            param.requires_grad = False
+                    
+                trainable_paras += list(additional_weight)
 
 
-                if entry.trainable:
-                    entry.model.train()
-                    trainable_models.append(entry.model)
-                    trainable_paras += list(entry.model.parameters())
-                else:
-                    entry.model.eval()
+            if entry.trainable:
+                trainable_models.append(entry.model)
+                trainable_paras += list(entry.model.parameters())
+            else:
+                entry.model.eval()
 
-            # optimizer
-            optimizer = self._get_optimizer(trainable_models,[])
+        # optimizer
+        optimizer = self._get_optimizer(trainable_models,[])
 
-            # scheduler
-            scheduler = None
-            if self.config.get('scheduler'):
-                scheduler = self._get_scheduler(optimizer)
+        # scheduler
+        scheduler = None
+        if self.config.get('scheduler'):
+            scheduler = self._get_scheduler(optimizer)
 
-            # specaug
-            specaug = None
-            if self.config.get('specaug'):
-                from .specaug import SpecAug
-                specaug = SpecAug(**self.config["specaug"])
+        # specaug
+        specaug = None
+        if self.config.get('specaug'):
+            from .specaug import SpecAug
+            specaug = SpecAug(**self.config["specaug"])
 
-            # progress bar
-            tqdm_file = sys.stderr if is_leader_process() else open(os.devnull, 'w')
-            pbar = tqdm(total=self.config['runner']['total_steps'], dynamic_ncols=True, desc='overall', file=tqdm_file)
-            init_step = self.init_ckpt.get('Step')
-            if init_step:
-                pbar.n = init_step
+        # progress bar
+        tqdm_file = sys.stderr if is_leader_process() else open(os.devnull, 'w')
+        pbar = tqdm(total=self.config['runner']['total_steps'], dynamic_ncols=True, desc='overall', file=tqdm_file)
+        init_step = self.init_ckpt.get('Step')
+        if init_step:
+            pbar.n = init_step
 
-            # Tensorboard logging
-            if is_leader_process():
-                logger = SummaryWriter(self.args.expdir)
+        # Tensorboard logging
+        if is_leader_process():
+            logger = SummaryWriter(self.args.expdir)
 
-            batch_ids = []
-            backward_steps = 0
-            records = defaultdict(list)
-            epoch = self.init_ckpt.get('Epoch', 0)
-            train_split = self.config['runner'].get(f"{adapterMode}_dataloader", adapterMode)
-            while pbar.n < pbar.total:
+        batch_ids = []
+        backward_steps = 0
+        records = defaultdict(list)
+        epoch = self.init_ckpt.get('Epoch', 0)
+        while pbar.n < pbar.total:
+            for adapterMode in ['train', 'switch']:
+                train_split = self.config['runner'].get(f"{adapterMode}_dataloader", adapterMode)
+                for entry in self.all_entries:
+                    if self.args.adapter != False and entry.name == "Upstream":
+                        for name, param in entry.model.named_parameters():
+                                if "adapter" in name or 'lora' in name:
+                                    
+                                    param.requires_grad = ("switch" in name) ^ (adapterMode == "train")
+                                    if param.requires_grad:
+                                        additional_weight.append(param)
+                                    print("Adapter!!", name, param.requires_grad)
+                                else:
+                                    param.requires_grad = False
                 try:
                     dataloader = self.downstream.model.get_dataloader(train_split, epoch=epoch)
                 except TypeError as e:
@@ -472,9 +486,9 @@ class Runner():
                             torch.save(all_states, path)
 
                     pbar.update(1)
-                epoch += 1
+            epoch += 1
 
-            pbar.close()
+        pbar.close()
 
         if self.args.push_to_hf_hub:
             self.push_to_huggingface_hub()

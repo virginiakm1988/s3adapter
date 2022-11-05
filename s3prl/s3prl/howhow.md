@@ -5,3 +5,5 @@ python3 preprocess/generate_len_for_bucket.py --input_data=/data1/b08902047/libr
 python run_downstream.py --adapter=houlsby -u hubert -d asr -m evaluate -t test-clean --device=cuda:0 -f -n hubert_asr_houlsby_{ops}
 
 ops: skip, sequential, parallel, ex: ops = 2 only considers first 2 paths.
+python run_downstream.py --adapter=houlsby -u hubert -d speech_commands -m train -f -n hubert_asr_houlsby_2
+

@@ -3288,7 +3288,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
             self.nas_ops = int(sys.argv[-1].split("_")[-1])
         except:
             pass
-        self.switch = AdapterSwitch(num_paths=self.nas_ops)
+        
+        self.adapterswitch = AdapterSwitch(num_paths=self.nas_ops)
+        # self.add_module("switch", AdapterSwitch(num_paths=self.nas_ops))
     def forward(
         self,
         x: torch.Tensor,
@@ -3350,7 +3352,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
             
             if adapter_output is not None:
                 adapterStack = torch.stack([x, adapter_output, parallel_output][:self.nas_ops], -2)
-                x = self.switch(adapterStack)
+                x = self.adapterswitch(adapterStack)
         else:
             x, attn = self.self_attn(
                 query=x,
@@ -3392,7 +3394,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
             
             if adapter_output is not None:
                 adapterStack = torch.stack([x, adapter_output, parallel_output][:self.nas_ops], -2)
-                x = self.switch(adapterStack)
+                x = self.adapterswitch(adapterStack)
             x = self.final_layer_norm(x)
 
         return x, (attn, layer_result)

@@ -4,11 +4,11 @@ import re
 import os
 import hashlib
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Dict
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler, random_split
 from catalyst.data.sampler import DistributedSamplerWrapper
 from torch.distributed import is_initialized
 from torch.nn.utils.rnn import pad_sequence
@@ -31,7 +31,8 @@ class DownstreamExpert(nn.Module):
 
         train_list, valid_list = split_dataset(self.datarc["speech_commands_root"])
 
-        self.train_dataset = SpeechCommandsDataset(train_list, **self.datarc)
+        self.train_dataset = SpeechCommandsDataset(train_list['train'], **self.datarc)
+        self.switch_train_dataset = SpeechCommandsDataset(train_list['eval'], **self.datarc)
         self.dev_dataset = SpeechCommandsDataset(valid_list, **self.datarc)
         self.test_dataset = SpeechCommandsTestingDataset(**self.datarc)
 
@@ -48,10 +49,11 @@ class DownstreamExpert(nn.Module):
         self.expdir = expdir
         self.register_buffer('best_score', torch.zeros(1))
 
-    def _get_balanced_train_dataloader(self, dataset, drop_last=False):
-        sampler = WeightedRandomSampler(dataset.sample_weights, len(dataset.sample_weights))
+    def _get_balanced_train_dataloader(self, dataset: SpeechCommandsDataset, drop_last=False):
         if is_initialized():
             sampler = DistributedSamplerWrapper(sampler)
+        sampler = WeightedRandomSampler(dataset.sample_weights, len(dataset.sample_weights))
+        
         return DataLoader(
             dataset,
             sampler=sampler,
@@ -87,6 +89,8 @@ class DownstreamExpert(nn.Module):
     def get_dataloader(self, mode):
         if mode == 'train':
             return self._get_balanced_train_dataloader(self.train_dataset, drop_last=True)
+        elif mode == 'switch':
+            return self._get_balanced_train_dataloader(self.switch_train_dataset, drop_last=True)
         elif mode == 'dev':
             return self._get_balanced_dev_dataloader(self.dev_dataset, drop_last=False)
         elif mode == 'test':
@@ -148,7 +152,7 @@ class DownstreamExpert(nn.Module):
 
 def split_dataset(
     root_dir: Union[str, Path], max_uttr_per_class=2 ** 27 - 1
-) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+) -> Tuple[Dict[List[Tuple[str, str]]], List[Tuple[str, str]]]:
     """Split Speech Commands into 3 set.
     
     Args:
@@ -159,7 +163,7 @@ def split_dataset(
         train_list: [(class_name, audio_path), ...]
         valid_list: as above
     """
-    train_list, valid_list = [], []
+    train_list, valid_list = {"train": [], "eval": []}, []
 
     for entry in Path(root_dir).iterdir():
         if not entry.is_dir() or entry.name == "_background_noise_":
@@ -176,7 +180,9 @@ def split_dataset(
                 valid_list.append((entry.name, audio_path))
             elif percentage_hash < 20:
                 pass  # testing set is discarded
+            elif percentage_hash < 80:
+                train_list['train'].append((entry.name, audio_path))
             else:
-                train_list.append((entry.name, audio_path))
+                train_list['eval'].append((entry.name, audio_path))
 
     return train_list, valid_list

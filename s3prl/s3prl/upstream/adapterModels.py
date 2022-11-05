@@ -420,7 +420,7 @@ class AdapterSwitch(nn.Module):
 
     fixed_idx: int = None
     
-    hard: bool = False
+    hard: bool = True
     
     def __init__(
         self,
@@ -453,6 +453,7 @@ class AdapterSwitch(nn.Module):
 
     def train(self, mode: bool = True):
         print('448', 'train invoked')
+        # self.switch_logits.requires_grad = mode
         self.training = mode
         if not mode:
             self.fixed_idx = torch.argmax(self.switch_logits, dim=-1).item()
@@ -462,6 +463,8 @@ class AdapterSwitch(nn.Module):
 
     def eval(self, mode: bool = False):
         self.training = mode
+        
+        # self.switch_logits.requires_grad = mode
         if not mode:
             self.fixed_idx = torch.argmax(self.switch_logits, dim=-1).item()
         else:
@@ -471,7 +474,7 @@ class AdapterSwitch(nn.Module):
     def forward(self, x):
         x = x.transpose(0, 1)
         batch_size, seq_length, num_classes, hidden_dim_size = x.size()
-        
+        print('477', self.switch_logits)
         if not self.training:
             return x[:,:, self.fixed_idx, :].transpose(0, 1)
 

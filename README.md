@@ -1,5 +1,5 @@
 # s3adapter
-![hylee](314607574_429050795897685_2679697667455393463_n.jpg|width=100)
+![hylee](314607574_429050795897685_2679697667455393463_n.jpg)
 ## Setting up
 1. directly clone this repo
 2. cd ./s3adapter/s3prl

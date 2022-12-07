@@ -1,4 +1,5 @@
 adapter:
+  exist: true
   type: houlsby
   switch: 
     exist: true
@@ -6,3 +7,7 @@ adapter:
     tau:
       type: constant
       init_value: 0.1
+    strategy: global
+
+  houlsby:
+    input: false

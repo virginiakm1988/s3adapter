@@ -173,6 +173,7 @@ class Runner():
             ckpt = ckpt_path,
             model_config = self.args.upstream_model_config,
             refresh = upstream_refresh,
+            adapterConfig = self.args.upstream_adapter_config,
         ).to(self.args.device)
 
         if is_initialized() and get_rank() == 0:
@@ -256,7 +257,7 @@ class Runner():
 
 
     def train(self):
-        wandb.init(project=self.args.expname)
+        wandb.init(project=f'{self.args.upstream}-{self.args.downstream}')
         wandb.config.update(self.args)
         
         # trainable parameters and train/eval mode

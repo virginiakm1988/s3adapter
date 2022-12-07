@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class UpstreamExpert(UpstreamBase):
     def __init__(self, ckpt, **kwargs):
         super().__init__(**kwargs)
-        model, task_cfg = load_converted_model(ckpt)
+        model, task_cfg = load_converted_model(ckpt, **kwargs)
         self.model = model
         self.task_cfg = task_cfg
 

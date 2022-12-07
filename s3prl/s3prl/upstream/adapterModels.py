@@ -14,6 +14,7 @@ from .configuration import (
 '''
 import logging
 # logger = logging.getLogger(__name__)
+from dataclasses import dataclass, field
 from argparse import Namespace
 '''
 class Activation_Function_Class(nn.Module):
@@ -408,6 +409,40 @@ class GLOWCouplingBlock(nn.Module):
         return input_dims
 '''
 
+import json
+   
+# declaringa a class
+class obj:
+      
+    # constructor
+    def __init__(self, dict1):
+        self.__dict__.update(dict1)
+
+def dict2obj(dict1):
+      
+    # using json.loads method and passing json.dumps
+    # method and custom object hook as arguments
+    return json.loads(json.dumps(dict1), object_hook=obj)
+
+@dataclass
+class AdapterConfig:
+    adapterType: str = field(
+        default = "houlsby", metadata={"help": "Adapter type to use."}
+    )
+    switch: bool = field(
+        default = False, metadata={"help": "Whether to use adapter switch."}
+    )
+    nasPath: int = field(
+        default = 2, metadata={"help": "Number of paths in the adapter switch."}
+    )
+    temperature: float = field(
+        default = 0.1, metadata={"help": "Temperature for adapter switch."}
+    )
+    tauType: str = field(
+        default = 'constant', metadata={"help": "Type of tau to use."}
+    )
+    
+
 class AdapterSwitch(nn.Module):
 
     config: Namespace
@@ -426,9 +461,8 @@ class AdapterSwitch(nn.Module):
     
     def __init__(
         self,
-        config: Namespace=Namespace(temperature=0.1, strategy='global'),
+        config: object = None,
         initial_logits: List[float] = None,
-        num_paths: int = 3,
         layer_idx: int = None
     ):
         super().__init__()
@@ -438,14 +472,14 @@ class AdapterSwitch(nn.Module):
         # Keep the logits of probabilities as a separate parameters.
         
 
-        self.switch_temperature = torch.tensor([self.config.temperature])
+        self.switch_temperature = torch.tensor([self.config.tau.init_value])
 
         # Distribution used.
         self.gumbel = torch.distributions.Gumbel(0, 1)
         self.training = True
-        self.paths = num_paths
+        self.paths = self.config.path
         self.layer_idx = layer_idx
-        initial_logits = ([1. / num_paths] * num_paths if initial_logits is None else initial_logits)
+        initial_logits = ([1. / self.paths] * self.paths if initial_logits is None else initial_logits)
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.tensor(initial_logits))
                 )

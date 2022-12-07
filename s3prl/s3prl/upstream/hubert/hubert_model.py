@@ -284,6 +284,7 @@ class HubertModel(torch.nn.Module):
         cfg: HubertConfig,
         task_cfg: HubertPretrainingConfig,
         dictionaries: List[Any],
+        **kwargs: Any,
     ) -> None:
         super().__init__()
         logger.info(f"HubertModel Config: {cfg}")
@@ -334,7 +335,7 @@ class HubertModel(torch.nn.Module):
             torch.FloatTensor(cfg.encoder_embed_dim).uniform_()
         )
 
-        self.encoder = TransformerEncoder(cfg)
+        self.encoder = TransformerEncoder(cfg, **kwargs)
         self.layer_norm = LayerNorm(self.embed)
 
         self.target_glu = None

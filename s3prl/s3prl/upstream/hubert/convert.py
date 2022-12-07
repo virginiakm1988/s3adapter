@@ -34,7 +34,7 @@ def load_and_convert_fairseq_ckpt(fairseq_source: str, output_path: str = None):
         torch.save(output_state, output_path)
 
 
-def load_converted_model(ckpt: str):
+def load_converted_model(ckpt: str, **kwargs):
     ckpt_state = torch.load(ckpt, map_location="cpu")
 
 
@@ -51,7 +51,7 @@ def load_converted_model(ckpt: str):
 
     task_cfg = merge_with_parent(HubertPretrainingConfig, ckpt_state["task_cfg"])
     model_cfg = merge_with_parent(HubertConfig, ckpt_state["model_cfg"])
-    model = HubertModel(model_cfg, task_cfg, ckpt_state["dictionaries_symbols"])
+    model = HubertModel(model_cfg, task_cfg, ckpt_state["dictionaries_symbols"], **kwargs)
 
     model.load_state_dict(ckpt_state["model_weight"], strict = False)
     return model, task_cfg

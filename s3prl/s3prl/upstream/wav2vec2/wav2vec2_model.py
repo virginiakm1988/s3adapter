@@ -19,7 +19,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from ..adapterModels import AdapterSwitch
+# for adapters
+from ..adapterModels import AdapterSwitch, AdapterConfig, dict2obj
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -805,6 +807,7 @@ class MultiheadAttention(nn.Module):
         xformers_blocksparse_blocksize: Optional[
             int
         ] = 16,  # This should be part of the config
+        adapterConfig: object = None,
     ):
         super().__init__()
 
@@ -844,7 +847,7 @@ class MultiheadAttention(nn.Module):
 
 
         ####LoRA####
-        if 'lora' in sys.argv[-1]:
+        if adapterConfig.adapter.type == 'lora':  # 'lora' in sys.argv[-1]:
             self.k_proj = quant_noise(
                 lora.Linear(self.kdim, embed_dim, r=8), q_noise, qn_block_size
             )
@@ -2973,7 +2976,7 @@ def make_conv_pos(e, k, g):
 
 
 class TransformerEncoder(nn.Module):
-    def build_encoder_layer(self, args: Wav2Vec2Config, layer_idx: int):
+    def build_encoder_layer(self, args: Wav2Vec2Config, layer_idx: int, adapterConfig: object=None):
         if args.layer_type == "transformer":
             layer = TransformerSentenceEncoderLayer(
                 embedding_dim=self.embedding_dim,
@@ -2984,7 +2987,8 @@ class TransformerEncoder(nn.Module):
                 activation_dropout=args.activation_dropout,
                 activation_fn=args.activation_fn,
                 layer_norm_first=args.layer_norm_first,
-                layer_idx=layer_idx
+                layer_idx=layer_idx,
+                adapterConfig=adapterConfig,
             )
         elif args.layer_type == "conformer":
             layer = ConformerWav2Vec2EncoderLayer(
@@ -3000,7 +3004,7 @@ class TransformerEncoder(nn.Module):
             )
         return layer
 
-    def __init__(self, args: Wav2Vec2Config):
+    def __init__(self, args: Wav2Vec2Config, **kwargs):
         super().__init__()
 
         self.dropout = args.dropout
@@ -3044,9 +3048,25 @@ class TransformerEncoder(nn.Module):
                 args.conv_pos_groups,
             )
 
+        # parsing adapter Config file...
+        adapterConfig = AdapterConfig
+        if 'adapterConfig' in kwargs:
+            customConfig = kwargs['adapterConfig']
+            with open(customConfig, 'r') as f:
+                customConfig = yaml.load(f, Loader=yaml.FullLoader)
+            customConfig = dict2obj(customConfig)
+            '''
+            adapterConfig.adapterType = customConfig.adapter.type
+            adapterConfig.switch = customConfig.adapter.switch.exist
+            if adapterConfig.switch:
+                adapterConfig.nasPath = customConfig.adapter.switch.path
+                adapterConfig.temperature = customConfig.adapter.switch.tau.init_value
+                adapterConfig.tauType = customConfig.adapter.switch.tau.type
+            ''' 
         self.layers = nn.ModuleList(
-            [self.build_encoder_layer(args, i) for i in range(args.encoder_layers)]
+            [self.build_encoder_layer(args, i, adapterConfig=customConfig) for i in range(args.encoder_layers)]
         )
+        
         self.layer_norm_first = args.layer_norm_first
         self.layer_norm = LayerNorm(self.embedding_dim)
         self.layerdrop = args.encoder_layerdrop
@@ -3236,7 +3256,8 @@ class TransformerSentenceEncoderLayer(nn.Module):
         activation_fn: str = "relu",
         layer_norm_first: bool = False,
         switch_used: bool = False,
-        layer_idx: int = None
+        layer_idx: int = None,
+        adapterConfig: object = None,
     ) -> None:
 
         super().__init__()
@@ -3252,14 +3273,15 @@ class TransformerSentenceEncoderLayer(nn.Module):
             num_attention_heads,
             dropout=attention_dropout,
             self_attention=True,
+            adapterConfig=adapterConfig,
         )
 
         # print('3254', sys.argv)
-        if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+        if adapterConfig.adapter.exist and adapterConfig.adapter.type == 'adapterbias': # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
             print('AdapterBias!!!')
             self.adapter_vector = nn.Parameter(torch.ones((768), requires_grad=True))
             self.adapter_alpha = nn.Linear(ffn_embedding_dim, 1) #每個layer的xi都不一樣
-        elif 'houlsby' in sys.argv[-1]:
+        elif adapterConfig.adapter.exist and adapterConfig.adapter.type == 'houlsby':
             print('Houlsby!!!')
             self.seq_adapter = nn.Sequential(
                 nn.Linear(self.embedding_dim, 32),
@@ -3271,7 +3293,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 nn.GELU(),
                 nn.Linear(32, self.embedding_dim),
             )
-        elif 'lora' in sys.argv[-1]:
+        elif adapterConfig.adapter.exist and adapterConfig.adapter.type == 'lora':
             print('LoRA!!!')
         else:
             print('Original Hubert!!!')
@@ -3290,13 +3312,10 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
         # layer norm associated with the position wise feed-forward NN
         self.final_layer_norm = LayerNorm(self.embedding_dim)
-        self.nas_ops = 3
-        try:
-            self.nas_ops = int(sys.argv[-1].split("_")[-1])
-        except:
-            pass
         
-        self.adapterswitch = AdapterSwitch(num_paths=self.nas_ops, layer_idx=layer_idx)
+        # adapter configs...        
+        self.adapterswitch = AdapterSwitch(config=adapterConfig.adapter.switch, layer_idx=layer_idx)
+        self.adapterConfig = adapterConfig
         # self.add_module("switch", AdapterSwitch(num_paths=self.nas_ops))
     def forward(
         self,
@@ -3332,14 +3351,14 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.activation_fn(self.fc1(x))
 
             #add adapter input
-            if 'adapter' in sys.argv[-1]:
+            if self.adapterConfig.adapter.exist:  #  'adapter' in sys.argv[-1]:
                 adapter_input = x
 
             x = self.dropout2(x)
             x = self.fc2(x)
 
             #add adapter input
-            if 'houlsby_input' in sys.argv[-1]:
+            if self.adapterConfig.adapter.houlsby.input:  #  'houlsby_input' in sys.argv[-1]:
                 houlsby_input = x
 
             layer_result = x
@@ -3347,11 +3366,11 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.dropout3(x)
 
             
-            if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+            if self.adapterConfig.adapter.exist and self.adapterConfig.adapter.type == 'adapterbias':  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
                 adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
                 x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
                 parallel_output = self.adapter_vector * self.adapter_alpha(residual)
-            elif 'houlsby' in sys.argv[-1]:
+            elif self.adapterConfig.adapter.type == 'houlsby': # 'houlsby' in sys.argv[-1]:
                 adapter_output = self.seq_adapter(houlsby_input)
                 x = x + residual # +  self.seq_adapter(houlsby_input)
                 parallel_output = self.parallel_adapter(parallel_input)
@@ -3359,7 +3378,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 x = x + residual
             
             if adapter_output is not None:
-                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output][:self.nas_ops], -2)
+                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output][:self.adapterConfig.adapter.switch.path], -2)
                 x = self.adapterswitch(adapterStack)
         else:
             x, attn = self.self_attn(
@@ -3389,11 +3408,11 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             x = self.dropout3(x)
 
-            if 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+            if self.adapterConfig.adapter.exist and self.adapterConfig.adapter.type == 'adapterbias':  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
                 adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
                 x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
                 parallel_output = self.adapter_vector * self.adapter_alpha(residual)
-            elif 'houlsby' in sys.argv[-1]:
+            elif self.adapterConfig.adapter.type == 'houlsby': # 'houlsby' in sys.argv[-1]:
                 adapter_output = self.seq_adapter(houlsby_input)
                 x = x + residual # +  self.seq_adapter(houlsby_input)
                 parallel_output = self.parallel_adapter(parallel_input)
@@ -3401,7 +3420,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 x = x + residual
             
             if adapter_output is not None:
-                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output][:self.nas_ops], -2)
+                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output][:self.adapterConfig.adapter.switch.path], -2)
                 x = self.adapterswitch(adapterStack)
             x = self.final_layer_norm(x)
 

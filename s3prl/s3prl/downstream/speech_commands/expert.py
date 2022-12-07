@@ -3,6 +3,7 @@
 import re
 import os
 import hashlib
+import sys
 from pathlib import Path
 from typing import List, Tuple, Union, Dict
 
@@ -30,8 +31,10 @@ class DownstreamExpert(nn.Module):
         self.modelrc = downstream_expert["modelrc"]
 
         train_list, valid_list = split_dataset(self.datarc["speech_commands_root"])
-
-        self.train_dataset = SpeechCommandsDataset(train_list['train'], **self.datarc)
+        num_paths = int(sys.argv[-1].split('_')[-1])
+        print('export 35', num_paths)
+        self.train_dataset = SpeechCommandsDataset(train_list['train'] + 
+                                                   train_list['eval'] * (num_paths == 1), **self.datarc)
         self.switch_train_dataset = SpeechCommandsDataset(train_list['eval'], **self.datarc)
         self.dev_dataset = SpeechCommandsDataset(valid_list, **self.datarc)
         self.test_dataset = SpeechCommandsTestingDataset(**self.datarc)

@@ -1,0 +1,8 @@
+adapter:
+  type: houlsby
+  switch: 
+    exist: true
+    path: 2
+    tau:
+      type: constant
+      init_value: 0.1

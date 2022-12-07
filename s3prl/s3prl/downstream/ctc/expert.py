@@ -2,6 +2,7 @@ import os
 import math
 import torch
 import random
+import wandb
 
 import torch
 import torch.nn as nn
@@ -52,13 +53,14 @@ class DownstreamExpert(nn.Module):
         self.register_buffer(
             "best_score", torch.ones(1) * (0 if self.metric_higher_better else 1 << 31)
         )
+        self.switch_ratio = float(downstream_expert['switch_ratio'])
 
     def _get_task_name(self):
         return f'ctc-{self.corpus["name"].lower()}'
 
     # Interface
     def get_dataloader(self, split):
-        return load_dataset(split, self.tokenizer, self.corpus)
+        return load_dataset(split, self.tokenizer, self.corpus, switch_ratio=self.switch_ratio)
 
     # Interface
     def forward(self, split, features, labels, filenames, records, **kwargs):
@@ -110,14 +112,16 @@ class DownstreamExpert(nn.Module):
     # interface
     def log_records(self, split, records, logger, global_step, **kwargs):
         loss = torch.FloatTensor(records["loss"]).mean().item()
-        results = {"loss": loss}
+        results = {f"{split}-loss": loss}
 
         for metric in self.metrics:
-            results[metric] = eval(metric)(
+            log_key = f"{split}-{metric}"
+            results[log_key] = eval(metric)(
                 hypothesis=records["hypothesis"],
                 groundtruth=records["groundtruth"],
             )
 
+        wandb.log(results, step=global_step)
         save_names = []
         for key, value in results.items():
             print(f"{split} {key}: {value}")

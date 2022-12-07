@@ -36,7 +36,7 @@ optimizer:
 downstream_expert:
   corpus:                                 
     name: 'librispeech'                   # Specify corpus
-    path: '/path/to/LibriSpeech'          # Path to raw LibriSpeech dataset
+    path: '/work/u2752721/LibriSpeech'          # Path to raw LibriSpeech dataset
 
     train: ['train-clean-100']                # Name of data splits to be used as training set
     dev: ['dev-clean']                    # Name of data splits to be used as validation set

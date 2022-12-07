@@ -71,12 +71,17 @@ def create_dataset(split, tokenizer, name, bucketing, batch_size, **kwargs):
     return dataset, loader_bs
 
 
-def load_dataset(split, tokenizer, corpus):
+def load_dataset(split, tokenizer, corpus, switch_ratio=0.3):
     ''' Prepare dataloader for training/validation'''
+    real_split = split
+    split = 'train' if split == 'switch' else split
+    collate_fn = partial(collect_audio_batch, split=split)
     num_workers = corpus.pop('num_workers', 12)
     dataset, loader_bs = create_dataset(split, tokenizer, num_workers=num_workers, **corpus)
-    collate_fn = partial(collect_audio_batch, split=split)
+    
     if split == 'train':
+        dataset = torch.utils.data.random_split(dataset, [1 - switch_ratio, switch_ratio])
+        dataset = dataset[int(real_split == 'switch')]
         sampler = DistributedSampler(dataset) if is_initialized() else None
         dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=(sampler is None),
                                 sampler=sampler, collate_fn=collate_fn, num_workers=num_workers)

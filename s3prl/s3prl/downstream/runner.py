@@ -12,6 +12,7 @@ from pathlib import Path
 import torch
 import torchaudio
 import numpy as np
+import wandb
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from torch.utils.data import DistributedSampler
@@ -92,7 +93,7 @@ class Runner():
         self.args = args
         self.config = config
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
-
+        print(self.init_ckpt.keys())
         self.upstream = self._get_upstream()
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
@@ -116,6 +117,7 @@ class Runner():
                     model.load_state_dict(model_dict)
             if self.args.adapter:
                 adapter_weight = self.init_ckpt.get("adapter")
+                print('119', adapter_weight)
                 if adapter_weight:
                     show(f'[Runner] - Loading {"Adapter"} weights from the previous experiment')
                     model_dict = model.state_dict()
@@ -254,6 +256,9 @@ class Runner():
 
 
     def train(self):
+        wandb.init(project=self.args.expname)
+        wandb.config.update(self.args)
+        
         # trainable parameters and train/eval mode
         
         trainable_models = []
@@ -277,7 +282,6 @@ class Runner():
             if self.args.adapter != False and entry.name == "Upstream":
                 for  name, param in entry.model.named_parameters():
                         if "adapter" in name or 'lora' in name:
-                            
                             param.requires_grad = True
                             if param.requires_grad:
                                 additional_weight.append(param)
@@ -324,19 +328,19 @@ class Runner():
         records = defaultdict(list)
         epoch = self.init_ckpt.get('Epoch', 0)
         while pbar.n < pbar.total:
-            for adapterMode in ['train', 'switch']:
+            for adapterMode in ['switch', 'train']:
                 train_split = self.config['runner'].get(f"{adapterMode}_dataloader", adapterMode)
                 for entry in self.all_entries:
                     if self.args.adapter != False and entry.name == "Upstream":
                         for name, param in entry.model.named_parameters():
-                                if "adapter" in name or 'lora' in name:
-                                    
-                                    param.requires_grad = ("switch" in name) ^ (adapterMode == "train")
-                                    if param.requires_grad:
-                                        additional_weight.append(param)
-                                    print("Adapter!!", name, param.requires_grad)
-                                else:
-                                    param.requires_grad = False
+                            if "adapter" in name or 'lora' in name:
+                                
+                                param.requires_grad = ("switch" in name) ^ (adapterMode == "train")
+                                if param.requires_grad:
+                                    additional_weight.append(param)
+                                print("Adapter!!", name, param.requires_grad)
+                            else:
+                                param.requires_grad = False
                 try:
                     dataloader = self.downstream.model.get_dataloader(train_split, epoch=epoch)
                 except TypeError as e:
@@ -414,7 +418,11 @@ class Runner():
                         continue
 
                     # logging
-                    if global_step % self.config['runner']['log_step'] == 0:
+                    # if global_step % self.config['runner']['log_step'] == 0:
+                    #     print(records.keys())
+                    #     wandb_log = {f'train acc': sum(records['acc']) / len(records['acc']),
+                    #                  f'train loss': sum(records['loss']) / len(records['loss'])}
+                    #     wandb.log(wandb_log, step=global_step)
                         self.downstream.model.log_records(
                             train_split,
                             records = records,
@@ -543,7 +551,10 @@ class Runner():
                     batch_id = batch_id,
                 )
                 batch_ids.append(batch_id)
-
+        # logging
+        # wandb_log = {f'{split} acc': sum(records['acc']) / len(records['acc']),
+        #              f'{split} loss': sum(records['loss']) / len(records['loss'])}
+        # wandb.log(wandb_log, step=global_step)
         save_names = self.downstream.model.log_records(
             split,
             records = records,

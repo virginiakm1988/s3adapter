@@ -250,6 +250,7 @@ class Featurizer(nn.Module):
         else:
             stacked_feature = stacked_feature.view(depth , -1)
             norm_weights = F.softmax(self.weights[:depth], dim=-1)
+        # print(f'norm_weights: {norm_weights}')
         weighted_feature = (norm_weights.unsqueeze(-1) * stacked_feature).sum(dim=0)
         weighted_feature = weighted_feature.view(*origin_shape)
 

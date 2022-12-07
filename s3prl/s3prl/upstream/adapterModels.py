@@ -419,14 +419,17 @@ class AdapterSwitch(nn.Module):
     fixed: int = None
 
     fixed_idx: int = None
+
+    layer_idx: int = None
     
-    hard: bool = True
+    hard: bool = False
     
     def __init__(
         self,
-        config: Namespace=Namespace(temperature=1.0, strategy='global'),
+        config: Namespace=Namespace(temperature=0.1, strategy='global'),
         initial_logits: List[float] = None,
-        num_paths: int = 3
+        num_paths: int = 3,
+        layer_idx: int = None
     ):
         super().__init__()
 
@@ -441,6 +444,7 @@ class AdapterSwitch(nn.Module):
         self.gumbel = torch.distributions.Gumbel(0, 1)
         self.training = True
         self.paths = num_paths
+        self.layer_idx = layer_idx
         initial_logits = ([1. / num_paths] * num_paths if initial_logits is None else initial_logits)
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.tensor(initial_logits))
@@ -452,18 +456,20 @@ class AdapterSwitch(nn.Module):
         return torch.softmax(self.switch_logits, dim=-1)
 
     def train(self, mode: bool = True):
-        print('448', 'train invoked')
+        print('448', f'{"train" if mode else "eval"} invoked')
         # self.switch_logits.requires_grad = mode
         self.training = mode
         if not mode:
             self.fixed_idx = torch.argmax(self.switch_logits, dim=-1).item()
+            print(f'path index after layer_{self.layer_idx}: {self.fixed_idx}')
         else:
             self.fixed_idx = None
         return super().train(mode)
 
     def eval(self, mode: bool = False):
         self.training = mode
-        
+        print("468", "eval invoked")
+        print("mode: ", mode)
         # self.switch_logits.requires_grad = mode
         if not mode:
             self.fixed_idx = torch.argmax(self.switch_logits, dim=-1).item()
@@ -491,11 +497,13 @@ class AdapterSwitch(nn.Module):
         # Compute the weights of the convex sum.
         weights = torch.softmax((g + self.switch_logits) / self.switch_temperature[0], dim=-1)
         # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
+        
         if self.hard:
             y_hard = Gumbel.onehot_from_logits(weights)
             #print(y_hard[0], "random")
             weights = (y_hard - weights).detach() + weights
-        # weights = torch.nn.functional.gumbel_softmax(logits=self.switch_logits, tau=self.switch_temperature, hard=(not self.training))
+        
+        # weights = torch.nn.functional.gumbel_softmax(logits=self.switch_logits.expand(sample_size).to(self.probs.device), tau=self.switch_temperature, hard=(self.hard))
         # Compute the output.
         if self.config.strategy == 'global':
             y = torch.einsum('ijkl,ik->ijl', x, weights)

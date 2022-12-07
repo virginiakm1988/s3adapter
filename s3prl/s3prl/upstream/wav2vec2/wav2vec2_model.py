@@ -2973,7 +2973,7 @@ def make_conv_pos(e, k, g):
 
 
 class TransformerEncoder(nn.Module):
-    def build_encoder_layer(self, args: Wav2Vec2Config):
+    def build_encoder_layer(self, args: Wav2Vec2Config, layer_idx: int):
         if args.layer_type == "transformer":
             layer = TransformerSentenceEncoderLayer(
                 embedding_dim=self.embedding_dim,
@@ -2984,6 +2984,7 @@ class TransformerEncoder(nn.Module):
                 activation_dropout=args.activation_dropout,
                 activation_fn=args.activation_fn,
                 layer_norm_first=args.layer_norm_first,
+                layer_idx=layer_idx
             )
         elif args.layer_type == "conformer":
             layer = ConformerWav2Vec2EncoderLayer(
@@ -3044,7 +3045,7 @@ class TransformerEncoder(nn.Module):
             )
 
         self.layers = nn.ModuleList(
-            [self.build_encoder_layer(args) for _ in range(args.encoder_layers)]
+            [self.build_encoder_layer(args, i) for i in range(args.encoder_layers)]
         )
         self.layer_norm_first = args.layer_norm_first
         self.layer_norm = LayerNorm(self.embedding_dim)
@@ -3235,6 +3236,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         activation_fn: str = "relu",
         layer_norm_first: bool = False,
         switch_used: bool = False,
+        layer_idx: int = None
     ) -> None:
 
         super().__init__()
@@ -3259,7 +3261,12 @@ class TransformerSentenceEncoderLayer(nn.Module):
             self.adapter_alpha = nn.Linear(ffn_embedding_dim, 1) #每個layer的xi都不一樣
         elif 'houlsby' in sys.argv[-1]:
             print('Houlsby!!!')
-            self.adapter = nn.Sequential(
+            self.seq_adapter = nn.Sequential(
+                nn.Linear(self.embedding_dim, 32),
+                nn.GELU(),
+                nn.Linear(32, self.embedding_dim),
+            )
+            self.parallel_adapter = nn.Sequential(
                 nn.Linear(self.embedding_dim, 32),
                 nn.GELU(),
                 nn.Linear(32, self.embedding_dim),
@@ -3289,7 +3296,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         except:
             pass
         
-        self.adapterswitch = AdapterSwitch(num_paths=self.nas_ops)
+        self.adapterswitch = AdapterSwitch(num_paths=self.nas_ops, layer_idx=layer_idx)
         # self.add_module("switch", AdapterSwitch(num_paths=self.nas_ops))
     def forward(
         self,
@@ -3305,6 +3312,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         """
         residual = x
         adapter_output = parallel_output = None
+        parallel_input = x
         # print('3298', residual.shape)
         if self.layer_norm_first:
             x = self.self_attn_layer_norm(x)
@@ -3344,14 +3352,14 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
                 parallel_output = self.adapter_vector * self.adapter_alpha(residual)
             elif 'houlsby' in sys.argv[-1]:
-                adapter_output = self.adapter(houlsby_input)
-                x = x + residual # +  self.adapter(houlsby_input)
-                parallel_output = self.adapter(residual)
+                adapter_output = self.seq_adapter(houlsby_input)
+                x = x + residual # +  self.seq_adapter(houlsby_input)
+                parallel_output = self.parallel_adapter(parallel_input)
             else:
                 x = x + residual
             
             if adapter_output is not None:
-                adapterStack = torch.stack([x, adapter_output, parallel_output][:self.nas_ops], -2)
+                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output][:self.nas_ops], -2)
                 x = self.adapterswitch(adapterStack)
         else:
             x, attn = self.self_attn(
@@ -3386,14 +3394,14 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
                 parallel_output = self.adapter_vector * self.adapter_alpha(residual)
             elif 'houlsby' in sys.argv[-1]:
-                adapter_output = self.adapter(houlsby_input)
-                x = x + residual # +  self.adapter(houlsby_input)
-                parallel_output = self.adapter(residual)
+                adapter_output = self.seq_adapter(houlsby_input)
+                x = x + residual # +  self.seq_adapter(houlsby_input)
+                parallel_output = self.parallel_adapter(parallel_input)
             else:
                 x = x + residual
             
             if adapter_output is not None:
-                adapterStack = torch.stack([x, adapter_output, parallel_output][:self.nas_ops], -2)
+                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output][:self.nas_ops], -2)
                 x = self.adapterswitch(adapterStack)
             x = self.final_layer_norm(x)
 

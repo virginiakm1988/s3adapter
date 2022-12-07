@@ -31,6 +31,7 @@ class DownstreamExpert(nn.Module):
         self.get_dataset()
 
         self.train_dataset = FluentCommandsDataset(self.train_df, self.base_path, self.Sy_intent)
+        self.switch_train_dataset = FluentCommandsDataset(self.switch_train_df, self.base_path, self.Sy_intent)
         self.dev_dataset = FluentCommandsDataset(self.valid_df, self.base_path, self.Sy_intent)
         self.test_dataset = FluentCommandsDataset(self.test_df, self.base_path, self.Sy_intent)
 
@@ -47,6 +48,7 @@ class DownstreamExpert(nn.Module):
         self.register_buffer('best_score', torch.zeros(1))
 
     def get_dataset(self):
+        # ToDo: split training dataset 
         self.base_path = self.datarc['file_path']
         train_df = pd.read_csv(os.path.join(self.base_path, "data", "train_data.csv"))
         valid_df = pd.read_csv(os.path.join(self.base_path, "data", "valid_data.csv"))
@@ -63,7 +65,9 @@ class DownstreamExpert(nn.Module):
             values_per_slot.append(len(slot_values))
         self.values_per_slot = values_per_slot
         self.Sy_intent = Sy_intent
-        self.train_df = train_df
+        self.switch_train_df = train_df.sample(frac=self.datarc['switch_ratio'])
+        self.train_df = train_df.drop(self.switch_train_df.index).reset_index()
+        self.switch_train_df = self.switch_train_df.reset_index()
         self.valid_df = valid_df
         self.test_df = test_df
 
@@ -85,6 +89,9 @@ class DownstreamExpert(nn.Module):
 
     def get_train_dataloader(self):
         return self._get_train_dataloader(self.train_dataset)
+
+    def get_switch_dataloader(self):
+        return self._get_train_dataloader(self.switch_train_dataset)
 
     def get_dev_dataloader(self):
         return self._get_eval_dataloader(self.dev_dataset)

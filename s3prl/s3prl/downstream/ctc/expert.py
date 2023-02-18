@@ -53,14 +53,15 @@ class DownstreamExpert(nn.Module):
         self.register_buffer(
             "best_score", torch.ones(1) * (0 if self.metric_higher_better else 1 << 31)
         )
-        self.switch_ratio = float(downstream_expert['switch_ratio'])
+        self.adapterConfig = None
 
     def _get_task_name(self):
         return f'ctc-{self.corpus["name"].lower()}'
 
     # Interface
     def get_dataloader(self, split):
-        return load_dataset(split, self.tokenizer, self.corpus, switch_ratio=self.switch_ratio)
+        return load_dataset(split, self.tokenizer, self.corpus,  
+                    switch_ratio=self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1))
 
     # Interface
     def forward(self, split, features, labels, filenames, records, **kwargs):
@@ -111,11 +112,26 @@ class DownstreamExpert(nn.Module):
 
     # interface
     def log_records(self, split, records, logger, global_step, **kwargs):
+        results = {}
+        key_prefix = f"{split}"
+        if 'adapter_mode' in kwargs:
+            key_prefix += f"-{kwargs['adapter_mode']}"
+        
         loss = torch.FloatTensor(records["loss"]).mean().item()
-        results = {f"{split}-loss": loss}
+        results.update({f"{key_prefix}-loss": loss})
+
+        if 'layers' in kwargs:
+            for i, layer in enumerate(kwargs['layers']):
+                # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
+                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                    results.update({f"{key_prefix}_{i}_{j}": logit})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+        if 'norm_weights' in kwargs:
+            for i, weight in enumerate(kwargs['norm_weights']):
+                results.update({f"{key_prefix}_norm_weights_{i}": weight})
 
         for metric in self.metrics:
-            log_key = f"{split}-{metric}"
+            log_key = f"{key_prefix}-{metric}"
             results[log_key] = eval(metric)(
                 hypothesis=records["hypothesis"],
                 groundtruth=records["groundtruth"],

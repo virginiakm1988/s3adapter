@@ -3,6 +3,7 @@ import math
 
 import torch
 from torch import nn
+torch.autograd.set_detect_anomaly(True)
 '''
 from rational.torch import Rational
 
@@ -13,7 +14,10 @@ from .configuration import (
 )
 '''
 import logging
-# logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
+FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
+logging.basicConfig(format=FORMAT)
+logger.setLevel(logging.INFO)
 from dataclasses import dataclass, field
 from argparse import Namespace
 '''
@@ -471,39 +475,39 @@ class AdapterSwitch(nn.Module):
 
         # Keep the logits of probabilities as a separate parameters.
         
-
-        self.switch_temperature = torch.tensor([self.config.tau.init_value])
-
+        self.tau_step = (self.config.tau.init_value - self.config.tau.stop_value) / self.config.tau.steps
+        self.switch_temperature = ([self.config.tau.init_value - self.tau_step * self.config.tau.init_steps])
+        self.hard = self.config.hard
         # Distribution used.
         self.gumbel = torch.distributions.Gumbel(0, 1)
         self.training = True
         self.paths = self.config.path
         self.layer_idx = layer_idx
-        initial_logits = ([1. / self.paths] * self.paths if initial_logits is None else initial_logits)
+        initial_logits = ([1. / len(self.paths)] * len(self.paths) if initial_logits is None else initial_logits)
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.tensor(initial_logits))
                 )
-        
-        print(f"paths = {len(initial_logits)}")
+        # self.soft_logits = self.probs()
+        logger.info(f"paths = {len(initial_logits)}")
     @property
     def probs(self):
-        return torch.softmax(self.switch_logits, dim=-1)
+        return torch.softmax(self.switch_logits / self.switch_temperature[0], dim=-1)
 
     def train(self, mode: bool = True):
-        print('448', f'{"train" if mode else "eval"} invoked')
+        logger.info(f'{"train" if mode else "eval"} invoked')
         # self.switch_logits.requires_grad = mode
         self.training = mode
         if not mode:
             self.fixed_idx = torch.argmax(self.switch_logits, dim=-1).item()
-            print(f'path index after layer_{self.layer_idx}: {self.fixed_idx}')
+            # self.soft_logits = torch.softmax(self.switch_logits / self.switch_temperature[0], -1)
+            logger.info(f'path index after layer_{self.layer_idx}: {self.fixed_idx}')
         else:
             self.fixed_idx = None
         return super().train(mode)
 
     def eval(self, mode: bool = False):
         self.training = mode
-        print("468", "eval invoked")
-        print("mode: ", mode)
+        # logger.info(f"eval invoked, mode = {mode}")
         # self.switch_logits.requires_grad = mode
         if not mode:
             self.fixed_idx = torch.argmax(self.switch_logits, dim=-1).item()
@@ -526,6 +530,7 @@ class AdapterSwitch(nn.Module):
             sample_size = [batch_size, seq_length, hidden_dim_size, num_classes]
 
         # Sample from Gumbel.
+        self.reduce_tau()
         g = self.gumbel.sample(sample_size).to(self.probs.device)
 
         # Compute the weights of the convex sum.
@@ -546,10 +551,12 @@ class AdapterSwitch(nn.Module):
         else:
             y = torch.einsum('ijkl,ijlk->ijl', x, weights)
 
+        
         # print('458', x.shape, y.shape, y.transpose(0, 1).shape)
         return y.transpose(0, 1)
-
-    
+    def reduce_tau(self):
+        self.switch_temperature[0] -= self.tau_step
+        
 class Adapter(nn.Module):
     def __init__(self) -> None:
         super().__init__()

@@ -3052,10 +3052,11 @@ class TransformerEncoder(nn.Module):
         adapterConfig = AdapterConfig
         if 'adapterConfig' in kwargs:
             customConfig = kwargs['adapterConfig']
+            '''
             with open(customConfig, 'r') as f:
                 customConfig = yaml.load(f, Loader=yaml.FullLoader)
             customConfig = dict2obj(customConfig)
-            '''
+            
             adapterConfig.adapterType = customConfig.adapter.type
             adapterConfig.switch = customConfig.adapter.switch.exist
             if adapterConfig.switch:
@@ -3378,7 +3379,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 x = x + residual
             
             if adapter_output is not None:
-                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output][:self.adapterConfig.adapter.switch.path], -2)
+                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
                 x = self.adapterswitch(adapterStack)
         else:
             x, attn = self.self_attn(
@@ -3420,7 +3421,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 x = x + residual
             
             if adapter_output is not None:
-                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output][:self.adapterConfig.adapter.switch.path], -2)
+                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
                 x = self.adapterswitch(adapterStack)
             x = self.final_layer_norm(x)
 

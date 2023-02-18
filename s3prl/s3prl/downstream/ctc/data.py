@@ -82,8 +82,8 @@ def load_dataset(split, tokenizer, corpus, switch_ratio=0.3):
     if split == 'train':
         dataset = torch.utils.data.random_split(dataset, [1 - switch_ratio, switch_ratio])
         dataset = dataset[int(real_split == 'switch')]
-        sampler = DistributedSampler(dataset) if is_initialized() else None
-        dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=(sampler is None),
+        sampler = DistributedSampler(dataset) if (is_initialized() and len(dataset) > 0) else None
+        dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=(sampler is None and len(dataset) > 0),
                                 sampler=sampler, collate_fn=collate_fn, num_workers=num_workers)
     else:
         dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=False,

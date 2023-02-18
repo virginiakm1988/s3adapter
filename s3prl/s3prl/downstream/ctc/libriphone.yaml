@@ -3,7 +3,7 @@ runner:
   gradient_clipping: 1
   gradient_accumulate_steps: 2
 
-  log_step: 100
+  log_step: 1000
   eval_step: 1000
   save_step: 100
   max_keep: 1
@@ -17,9 +17,9 @@ optimizer:
 
 # comment the whole scheduler config block
 # to disable learning rate scheduling
-# scheduler:
-#   name: linear_schedule_with_warmup
-#   num_warmup_steps: 1400
+scheduler:
+  name: linear_schedule_with_warmup
+  num_warmup_steps: 1400
 
 # comment the whole specaug config block
 # to disable specaug on representation
@@ -49,8 +49,6 @@ downstream_expert:
     bucketing: True                       # Enable/Disable bucketing 
     batch_size: 16
     num_workers: 24
-
-  switch_ratio: 0.3
 
   text:
     mode: 'word'                       # 'character'/'word'/'subword'

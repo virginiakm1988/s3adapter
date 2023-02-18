@@ -110,10 +110,11 @@ class DownstreamExpert(nn.Module):
     # interface
     def log_records(self, split, records, logger, global_step, **kwargs):
         loss = torch.FloatTensor(records["loss"]).mean().item()
-        results = {"loss": loss}
+        results = {f"{split}-loss": loss}
 
         for metric in self.metrics:
-            results[metric] = eval(metric)(
+            log_key = f"{split}-{metric}"
+            results[log_key] = eval(metric)(
                 hypothesis=records["hypothesis"],
                 groundtruth=records["groundtruth"],
             )

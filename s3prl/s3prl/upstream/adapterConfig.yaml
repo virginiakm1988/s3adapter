@@ -2,12 +2,19 @@ adapter:
   exist: true
   type: houlsby
   switch: 
+    first: false
     exist: true
-    path: 2
+    hard: true
+    path: [0, 1, 2]
     tau:
-      type: constant
-      init_value: 0.1
+      type: linear
+      init_value: 10
+      stop_value: 0.1
     strategy: global
+    ratio: 0.3
+    freq: 0.1  # 0~1
 
   houlsby:
     input: false
+
+# 0: seq adp, 1: no adp, 2: para adp

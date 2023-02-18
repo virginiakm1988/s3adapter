@@ -62,7 +62,7 @@ class LibriPhoneDataset(Dataset):
             split_list = list(Path(join(path, s)).rglob("*.flac"))
             assert len(split_list) > 0, "No data found @ {}".format(join(path,s))
             file_list += split_list
-        
+        # file_list = file_list[:40]
         text = []
         for f in tqdm(file_list, desc='word -> phonemes'):
             text.append(read_text(str(f), word2phonemes, tokenizer))

@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 class UpstreamExpert(UpstreamBase):
     def __init__(self, ckpt, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(**kwargs)         
         model, task_cfg = load_converted_model(ckpt)
         self.model = model
         self.wav_normalize = task_cfg.normalize

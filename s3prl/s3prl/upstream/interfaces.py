@@ -6,6 +6,7 @@ import numpy as np
 import torch.nn as nn
 from torch import Tensor
 import torch.nn.functional as F
+import wandb
 
 from s3prl.utility.helper import show
 
@@ -177,6 +178,7 @@ class Featurizer(nn.Module):
                 file=sys.stderr
             )
             self.weights = nn.Parameter(torch.zeros(self.layer_num))
+            self.norm_weights = torch.zeros(self.layer_num)
             feature = self._weighted_sum([f.cpu() for f in feature])
         else:
             feature = feature.cpu()
@@ -246,12 +248,12 @@ class Featurizer(nn.Module):
         
         if self.layer_num == len(feature):
             stacked_feature = stacked_feature.view(self.layer_num, -1)
-            norm_weights = F.softmax(self.weights, dim=-1)
+            self.norm_weights = F.softmax(self.weights, dim=-1)
         else:
             stacked_feature = stacked_feature.view(depth , -1)
-            norm_weights = F.softmax(self.weights[:depth], dim=-1)
-        # print(f'norm_weights: {norm_weights}')
-        weighted_feature = (norm_weights.unsqueeze(-1) * stacked_feature).sum(dim=0)
+            self.norm_weights = F.softmax(self.weights[:depth], dim=-1)
+        # print(f'norm_weight: {self.norm_weights}')
+        weighted_feature = (self.norm_weights.unsqueeze(-1) * stacked_feature).sum(dim=0)
         weighted_feature = weighted_feature.view(*origin_shape)
 
         return weighted_feature

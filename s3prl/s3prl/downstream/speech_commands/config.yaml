@@ -1,11 +1,11 @@
 runner:
-  total_steps: 200000
+  total_steps: 10
   gradient_clipping: 1
   gradient_accumulate_steps: 1
 
-  log_step: 100
+  log_step: 1
   eval_step: 5000
-  save_step: 1000
+  save_step: 5
   max_keep: 1
   eval_dataloaders:
     - dev
@@ -24,9 +24,9 @@ optimizer:
 
 downstream_expert:
   datarc:
-    speech_commands_root: /groups/public/benchmark/speech_commands/train
-    speech_commands_test_root: /groups/public/benchmark/speech_commands/test
-    num_workers: 8
+    speech_commands_root: /home/stan/1000GB_Dir/s3prl_dataset/speech_commands/speech_commands_v0.01
+    speech_commands_test_root: /home/stan/1000GB_Dir/s3prl_dataset/speech_commands/speech_commands_test_set_v0.01
+    num_workers: 24
     batch_size: 32
 
   modelrc:

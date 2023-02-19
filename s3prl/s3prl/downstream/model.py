@@ -4,14 +4,16 @@ import torch.nn.functional as F
 
 
 def get_downstream_model(input_dim, output_dim, config):
-    model_cls = eval(config['select'])
-    model_conf = config.get(config['select'], {})
+    model_cls = eval(config["select"])
+    model_conf = config.get(config["select"], {})
     model = model_cls(input_dim, output_dim, **model_conf)
     return model
 
 
 class FrameLevel(nn.Module):
-    def __init__(self, input_dim, output_dim, hiddens=None, activation='ReLU', **kwargs):
+    def __init__(
+        self, input_dim, output_dim, hiddens=None, activation="ReLU", **kwargs
+    ):
         super().__init__()
         latest_dim = input_dim
         self.hiddens = []
@@ -33,18 +35,23 @@ class FrameLevel(nn.Module):
 
 
 class UtteranceLevel(nn.Module):
-    def __init__(self,
+    def __init__(
+        self,
         input_dim,
         output_dim,
-        pooling='MeanPooling',
-        activation='ReLU',
+        pooling="MeanPooling",
+        activation="ReLU",
         pre_net=None,
-        post_net={'select': 'FrameLevel'},
+        post_net={"select": "FrameLevel"},
         **kwargs
     ):
         super().__init__()
         latest_dim = input_dim
-        self.pre_net = get_downstream_model(latest_dim, latest_dim, pre_net) if isinstance(pre_net, dict) else None
+        self.pre_net = (
+            get_downstream_model(latest_dim, latest_dim, pre_net)
+            if isinstance(pre_net, dict)
+            else None
+        )
         self.pooling = eval(pooling)(input_dim=latest_dim, activation=activation)
         self.post_net = get_downstream_model(latest_dim, output_dim, post_net)
 
@@ -59,39 +66,41 @@ class UtteranceLevel(nn.Module):
 
 
 class MeanPooling(nn.Module):
-
     def __init__(self, **kwargs):
         super(MeanPooling, self).__init__()
 
     def forward(self, feature_BxTxH, features_len, **kwargs):
-        ''' 
+        """
         Arguments
-            feature_BxTxH - [BxTxH]   Acoustic feature with shape 
+            feature_BxTxH - [BxTxH]   Acoustic feature with shape
             features_len  - [B] of feature length
-        '''
+        """
         agg_vec_list = []
         for i in range(len(feature_BxTxH)):
-            agg_vec = torch.mean(feature_BxTxH[i][:features_len[i]], dim=0)
+            agg_vec = torch.mean(feature_BxTxH[i][: features_len[i]], dim=0)
             agg_vec_list.append(agg_vec)
 
         return torch.stack(agg_vec_list), torch.ones(len(feature_BxTxH)).long()
 
 
 class AttentivePooling(nn.Module):
-    ''' Attentive Pooling module incoporate attention mask'''
+    """Attentive Pooling module incoporate attention mask"""
 
     def __init__(self, input_dim, activation, **kwargs):
         super(AttentivePooling, self).__init__()
         self.sap_layer = AttentivePoolingModule(input_dim, activation)
 
     def forward(self, feature_BxTxH, features_len):
-        ''' 
+        """
         Arguments
-            feature_BxTxH - [BxTxH]   Acoustic feature with shape 
+            feature_BxTxH - [BxTxH]   Acoustic feature with shape
             features_len  - [B] of feature length
-        '''
+        """
         device = feature_BxTxH.device
-        len_masks = torch.lt(torch.arange(features_len.max()).unsqueeze(0).to(device), features_len.unsqueeze(1))
+        len_masks = torch.lt(
+            torch.arange(features_len.max()).unsqueeze(0).to(device),
+            features_len.unsqueeze(1),
+        )
         sap_vec, _ = self.sap_layer(feature_BxTxH, len_masks)
 
         return sap_vec, torch.ones(len(feature_BxTxH)).long()
@@ -99,9 +108,10 @@ class AttentivePooling(nn.Module):
 
 class AttentivePoolingModule(nn.Module):
     """
-    Implementation of Attentive Pooling 
+    Implementation of Attentive Pooling
     """
-    def __init__(self, input_dim, activation='ReLU', **kwargs):
+
+    def __init__(self, input_dim, activation="ReLU", **kwargs):
         super(AttentivePoolingModule, self).__init__()
         self.W_a = nn.Linear(input_dim, input_dim)
         self.W = nn.Linear(input_dim, 1)
@@ -112,10 +122,10 @@ class AttentivePoolingModule(nn.Module):
         """
         input:
         batch_rep : size (B, T, H), B: batch size, T: sequence length, H: Hidden dimension
-        
+
         attention_weight:
         att_w : size (B, T, 1)
-        
+
         return:
         utter_rep: size (B, H)
         """

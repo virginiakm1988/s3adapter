@@ -15,7 +15,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from ..model import *
 from .dataset import SpeechCommandsDataset, SpeechCommandsTestingDataset, CLASSES
-
+import random
 
 class DownstreamExpert(nn.Module):
     """
@@ -47,6 +47,9 @@ class DownstreamExpert(nn.Module):
         self.objective = nn.CrossEntropyLoss()
         self.expdir = expdir
         self.register_buffer('best_score', torch.zeros(1))
+        
+        if kwargs.get('prime'):
+            self.prime_seed = kwargs.get('prime_seed')
 
     def _get_balanced_train_dataloader(self, dataset, drop_last=False):
         sampler = WeightedRandomSampler(dataset.sample_weights, len(dataset.sample_weights))

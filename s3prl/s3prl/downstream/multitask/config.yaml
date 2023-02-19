@@ -1,11 +1,11 @@
 runner:
-  total_steps: 2000
+  total_steps: 20000
   gradient_clipping: 1
-  gradient_accumulate_steps: 2
+  gradient_accumulate_steps: 1
 
-  log_step: 10
-  eval_step: 20
-  save_step: 20
+  log_step: 100
+  eval_step: 2500
+  save_step: 2500
   max_keep: 1
   eval_dataloaders:
     - dev
@@ -21,11 +21,8 @@ scheduler:
   name: linear_schedule_with_warmup
   num_warmup_steps: 1400
 
-downstream_expert:
-  datarc:
-    num_workers: 24
-    train_batch_size: 2
-    eval_batch_size: 2
+task_split:
+  train: ["fluent_commands", "speech_commands"]
+  eval: []
+  test: []
 
-  modelrc:
-    input_dim: 256

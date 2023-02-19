@@ -12,40 +12,35 @@
 ###############
 import os
 import random
-
-# -------------#
+#-------------#
 import pandas as pd
-
-# -------------#
+#-------------#
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data.dataset import Dataset
-
-# -------------#
+#-------------#
 import torchaudio
 
 
 DEFAULT_TIME_WARP_MODE = "bicubic"
 
-
 class SpecAug(torch.nn.Module):
     """SpecAug"""
-
     def __init__(
         self,
         apply_time_warp=True,
         time_warp_window=5,
         time_warp_mode="bicubic",
         apply_freq_mask=True,
-        freq_mask_width_range=(0, 20),
+        freq_mask_width_range=(0,20),
         num_freq_mask=2,
         apply_time_mask=True,
-        time_mask_width_range=(0, 100),
+        time_mask_width_range=(0,100),
         num_time_mask=2,
-        adaptive_number_ratio=0.04,
-        adaptive_size_ratio=0.04,
-        max_n_time_masks=20,
-        adaptive=False,
+        adaptive_number_ratio = 0.04,
+        adaptive_size_ratio = 0.04,
+        max_n_time_masks = 20,
+        adaptive=False
     ):
         assert any([apply_time_warp, apply_freq_mask, apply_time_mask])
 
@@ -76,7 +71,7 @@ class SpecAug(torch.nn.Module):
                 adaptive=adaptive,
                 adaptive_number_ratio=adaptive_number_ratio,
                 adaptive_size_ratio=adaptive_size_ratio,
-                max_n_time_masks=max_n_time_masks,
+                max_n_time_masks=max_n_time_masks
             )
         else:
             self.time_mask = None
@@ -92,7 +87,7 @@ class SpecAug(torch.nn.Module):
 
     def forward(self, xs, x_lengths=None):
         """Forward SpecAug.
-
+        
         Args:
             xs: list of features [(T, D)] x batchsize
             x_lengths: length of features
@@ -103,18 +98,14 @@ class SpecAug(torch.nn.Module):
         if x_lengths is None:
             x_lengths = torch.LongTensor([x.size(0) for x in xs])
 
-        batchsize, max_len, dim = (
-            len(x_lengths),
-            torch.max(x_lengths).item(),
-            xs[0].size(1),
-        )
+        batchsize, max_len, dim = len(x_lengths), torch.max(x_lengths).item(), xs[0].size(1)
         xs_pad = xs[0].new_zeros((batchsize, max_len, dim))
         for i, x in enumerate(xs):
-            xs_pad[i, : x_lengths[i]] = x
+            xs_pad[i, :x_lengths[i]] = x
 
         xs_pad, _ = self.apply_specaug(xs_pad, x_lengths)
 
-        xs = [xs_pad[i, : xs[i].size(0)] for i in range(batchsize)]
+        xs = [xs_pad[i, :xs[i].size(0)] for i in range(batchsize)]
         return xs, x_lengths
 
 
@@ -152,10 +143,7 @@ class TimeWarp(torch.nn.Module):
             x[:, :, :center], (warped, x.shape[3]), mode=self.mode, align_corners=False
         )
         right = torch.nn.functional.interpolate(
-            x[:, :, center:],
-            (t - warped, x.shape[3]),
-            mode=self.mode,
-            align_corners=False,
+            x[:, :, center:], (t - warped, x.shape[3]), mode=self.mode, align_corners=False
         )
 
         if x.requires_grad:
@@ -189,10 +177,10 @@ class MaskAlongAxis(torch.nn.Module):
         num_mask=2,
         dim="time",
         replace_with_zero=True,
-        adaptive_number_ratio=0.04,
-        adaptive_size_ratio=0.04,
-        max_n_time_masks=20,
-        adaptive=False,
+        adaptive_number_ratio = 0.04,
+        adaptive_size_ratio = 0.04,
+        max_n_time_masks = 20,
+        adaptive = False
     ):
         if isinstance(mask_width_range, int):
             mask_width_range = (0, mask_width_range)
@@ -242,14 +230,13 @@ class MaskAlongAxis(torch.nn.Module):
         D = spec.shape[self.dim]
         T = self.mask_width_range[1]
         num_mask = self.num_mask
-
-        if self.dim == 1 & self.adaptive:
-            if self.adaptive_number_ratio > 0:
-                num_mask = min(
-                    int(self.adaptive_number_ratio * D), self.max_n_time_masks
-                )
-            if self.adaptive_size_ratio > 0:
-                T = min(self.mask_width_range[1], int(self.adaptive_size_ratio * D))
+        
+        
+        if self.dim == 1 & self.adaptive :
+          if self.adaptive_number_ratio > 0:
+            num_mask = min(int(self.adaptive_number_ratio * D), self.max_n_time_masks)
+          if self.adaptive_size_ratio > 0:
+            T = min(self.mask_width_range[1], int(self.adaptive_size_ratio * D))
 
         # mask_length: (B, num_mask, 1)
         mask_length = torch.randint(

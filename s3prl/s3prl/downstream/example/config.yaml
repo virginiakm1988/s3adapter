@@ -1,5 +1,5 @@
 runner:
-  total_steps: 2000
+  total_steps: 20000
   gradient_clipping: 1
   gradient_accumulate_steps: 2
 
@@ -23,7 +23,7 @@ scheduler:
 
 downstream_expert:
   datarc:
-    num_workers: 24
+    num_workers: 12
     train_batch_size: 2
     eval_batch_size: 2
 

@@ -24,8 +24,8 @@ optimizer:
 
 downstream_expert:
   datarc:
-    file_path: /home/stan/1000GB_Dir/s3prl_dataset/fluent_speech_commands_dataset
-    num_workers: 24
+    file_path: /groups/public/benchmark/fluent_speech_commands_dataset
+    num_workers: 12
     train_batch_size: 32
     eval_batch_size: 32
 

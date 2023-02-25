@@ -270,19 +270,23 @@ class Runner():
                 trainable_paras += list(additional_weight)
 
             #### add adapters ##################
-            if self.args.adapter != False and entry.name == "Upstream":
+            if self.args.adapter != None and entry.name == "Upstream":
+                adapter_param = 0
                 for  name, param in entry.model.named_parameters():
                         if "adapter" in name or 'lora' in name:
                             additional_weight.append(param)
                             param.requires_grad = True
                             print("Adapter!!",name)
+                            adapter_param += param.nelement() 
+                            #print("Numbers of PARAMETER: %.2fM" % (total/1e6))
                         else:
                             param.requires_grad = False
                     
                 trainable_paras += list(additional_weight)
+                print("total_adapter param")
+                print("Numbers of adapter PARAMETER: %.2fM" % (adapter_param/1e6))
 
-
-            if entry.trainable:
+            elif entry.trainable:
                 entry.model.train()
                 trainable_models.append(entry.model)
                 trainable_paras += list(entry.model.parameters())

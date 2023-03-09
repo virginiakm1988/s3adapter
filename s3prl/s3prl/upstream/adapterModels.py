@@ -3,7 +3,7 @@ import math
 
 import torch
 from torch import nn
-torch.autograd.set_detect_anomaly(True)
+# torch.autograd.set_detect_anomaly(True)
 '''
 from rational.torch import Rational
 
@@ -14,10 +14,7 @@ from .configuration import (
 )
 '''
 import logging
-logger = logging.getLogger(__name__)
-FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
-logging.basicConfig(format=FORMAT)
-logger.setLevel(logging.INFO)
+from utility.helper import is_leader_process
 from dataclasses import dataclass, field
 from argparse import Namespace
 '''
@@ -428,6 +425,19 @@ def dict2obj(dict1):
     # method and custom object hook as arguments
     return json.loads(json.dumps(dict1), object_hook=obj)
 
+class MyLogger:
+    def __init__(self, logger) -> None:
+        
+        self.logger = logger
+        
+    def info(self, msg):
+        if is_leader_process():
+            self.logger.info(msg)
+logger = logging.getLogger(__name__)
+FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
+logging.basicConfig(format=FORMAT)
+logger.setLevel(logging.INFO)
+# logger = MyLogger(logger)
 @dataclass
 class AdapterConfig:
     adapterType: str = field(
@@ -475,7 +485,7 @@ class AdapterSwitch(nn.Module):
 
         # Keep the logits of probabilities as a separate parameters.
         
-        self.tau_step = (self.config.tau.init_value - self.config.tau.stop_value) / self.config.tau.steps
+        self.tau_step =  (self.config.tau.type == 'linear') * (self.config.tau.init_value - self.config.tau.stop_value) / self.config.tau.steps
         self.switch_temperature = ([self.config.tau.init_value - self.tau_step * self.config.tau.init_steps])
         self.hard = self.config.hard
         # Distribution used.
@@ -489,21 +499,34 @@ class AdapterSwitch(nn.Module):
                 )
         # self.soft_logits = self.probs()
         logger.info(f"paths = {len(initial_logits)}")
+        self.prev_mode = None
+        
     @property
     def probs(self):
         return torch.softmax(self.switch_logits / self.switch_temperature[0], dim=-1)
 
+    def get_arch(self):
+        return torch.argmax(self.switch_logits, dim=-1).item()
+    
     def train(self, mode: bool = True):
         logger.info(f'{"train" if mode else "eval"} invoked')
         # self.switch_logits.requires_grad = mode
         self.training = mode
         if not mode:
-            self.fixed_idx = torch.argmax(self.switch_logits, dim=-1).item()
+            self.fixed_idx = self.get_arch()
             # self.soft_logits = torch.softmax(self.switch_logits / self.switch_temperature[0], -1)
             logger.info(f'path index after layer_{self.layer_idx}: {self.fixed_idx}')
         else:
             self.fixed_idx = None
         return super().train(mode)
+
+    def switch_mode(self):
+        if self.prev_mode and not self.switch_logits.requires_grad:
+            self.fixed_idx = self.get_arch()
+        
+        self.prev_mode = self.switch_logits.requires_grad
+        return self.prev_mode
+            
 
     def eval(self, mode: bool = False):
         self.training = mode
@@ -537,7 +560,7 @@ class AdapterSwitch(nn.Module):
         weights = torch.softmax((g + self.switch_logits) / self.switch_temperature[0], dim=-1)
         # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
         
-        if self.hard:
+        if self.hard:  # and self.switch_mode():
             y_hard = Gumbel.onehot_from_logits(weights)
             #print(y_hard[0], "random")
             weights = (y_hard - weights).detach() + weights
@@ -551,11 +574,11 @@ class AdapterSwitch(nn.Module):
         else:
             y = torch.einsum('ijkl,ijlk->ijl', x, weights)
 
-        
+        # logger.info(f"{y[0]}\n{y.shape}\n{weights}")
         # print('458', x.shape, y.shape, y.transpose(0, 1).shape)
         return y.transpose(0, 1)
     def reduce_tau(self):
-        self.switch_temperature[0] -= self.tau_step
+        self.switch_temperature[0] = max(self.config.tau.stop_value, self.switch_temperature[0] - self.tau_step)
         
 class Adapter(nn.Module):
     def __init__(self) -> None:

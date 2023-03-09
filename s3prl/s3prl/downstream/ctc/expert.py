@@ -124,7 +124,7 @@ class DownstreamExpert(nn.Module):
             for i, layer in enumerate(kwargs['layers']):
                 # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
                 for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
-                    results.update({f"{key_prefix}_{i}_{j}": logit})
+                    results.update({f"layer_{i}/{key_prefix}_{j}": logit.item()})
                 results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
         if 'norm_weights' in kwargs:
             for i, weight in enumerate(kwargs['norm_weights']):
@@ -145,14 +145,17 @@ class DownstreamExpert(nn.Module):
             logger.add_scalar(
                 f"{self._get_task_name()}/{split}-{key}", value, global_step=global_step
             )
-            if key == self.metrics[0]:
+            
+            # print(f"149 {key} - {self.metrics[0]}")
+            if key.split('-')[-1] == self.metrics[0]:
                 save_criterion = (
                     value > self.best_score
                     if self.metric_higher_better
                     else value < self.best_score
                 )
                 if split in self.save_best_on and save_criterion:
-                    self.best_score = torch.ones(1) * value
+                    print("about to save dev-best?")
+                    self.best_score = (torch.ones(1) * value).to(self.best_score.device)
                     save_names.append(f"{split}-best.ckpt")
 
         if "test" in split or "dev" in split:

@@ -3,7 +3,7 @@ runner:
   gradient_clipping: 1
   gradient_accumulate_steps: 2
 
-  log_step: 1000
+  log_step: 100
   eval_step: 1000
   save_step: 100
   max_keep: 1

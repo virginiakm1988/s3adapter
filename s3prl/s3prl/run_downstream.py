@@ -69,6 +69,7 @@ def get_downstream_args():
     parser.add_argument('-k', '--upstream_ckpt', metavar='{PATH,URL,GOOGLE_DRIVE_ID}', help='Only set when the specified upstream need it')
     parser.add_argument('-g', '--upstream_model_config', help='The config file for constructing the pretrained model')
     parser.add_argument('-uac', '--upstream_adapter_config', help='The config file for constructing the adapter model', default='upstream/adapterConfig.yaml')
+    parser.add_argument('--ngpu', type=int, default=1)
     parser.add_argument('-r', '--upstream_refresh', action='store_true', help='Re-download cached ckpts for on-the-fly upstream variants')
     parser.add_argument('-f', '--upstream_trainable', action='store_true', help='Fine-tune, set upstream.train(). Default is upstream.eval()')
     parser.add_argument('-s', '--upstream_feature_selection', default='hidden_states', help='Specify the layer to be extracted as the representation')
@@ -165,6 +166,9 @@ def get_downstream_args():
 
         if args.upstream_model_config is not None and os.path.isfile(args.upstream_model_config):
             backup_files.append(args.upstream_model_config)
+            
+        if args.upstream_adapter_config is not None and os.path.isfile(args.upstream_adapter_config):
+            backup_files.append(args.upstream_adapter_config)
 
     if args.override is not None and args.override.lower() != "none":
         override(args.override, args, config)
@@ -219,6 +223,8 @@ def main():
 
         for file in backup_files:
             backup(file, args.expdir)
+            
+        
 
     # Fix seed and make backends deterministic
     random.seed(args.seed)
@@ -234,6 +240,7 @@ def main():
 
     runner = Runner(args, config)
     # print('234', runner.config)
+    
     eval(f'runner.{args.mode}')()
 
 

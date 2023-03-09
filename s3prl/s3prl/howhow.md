@@ -7,5 +7,7 @@ python run_downstream.py --adapter=houlsby -u hubert -d asr -m evaluate -t test-
 ops: sequential, skip, parallel, ex: ops = 2 only considers first 2 paths.
 python run_downstream.py --adapter=houlsby -u hubert -d ctc -m train -f -n hubert_ctc -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml
 
+ngpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d ctc -m train -f -n hubert_ctcc2 -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml --ngpu ${ngpus}
 
 

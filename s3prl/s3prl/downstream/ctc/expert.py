@@ -59,9 +59,9 @@ class DownstreamExpert(nn.Module):
         return f'ctc-{self.corpus["name"].lower()}'
 
     # Interface
-    def get_dataloader(self, split):
+    def get_dataloader(self, split, mode=None, epoch=None):
         return load_dataset(split, self.tokenizer, self.corpus,  
-                    switch_ratio=self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1))
+                    switch_ratio=self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1 and mode != 'train_stage2'))
 
     # Interface
     def forward(self, split, features, labels, filenames, records, **kwargs):
@@ -111,11 +111,11 @@ class DownstreamExpert(nn.Module):
         return loss
 
     # interface
-    def log_records(self, split, records, logger, global_step, **kwargs):
+    def log_records(self, split, records, logger, global_step, to_wandb=True, **kwargs):
         results = {}
         key_prefix = f"{split}"
-        if 'adapter_mode' in kwargs:
-            key_prefix += f"-{kwargs['adapter_mode']}"
+        # if 'adapter_mode' in kwargs:
+        #     key_prefix += f"-{kwargs['adapter_mode']}"
         
         loss = torch.FloatTensor(records["loss"]).mean().item()
         results.update({f"{key_prefix}-loss": loss})
@@ -129,6 +129,8 @@ class DownstreamExpert(nn.Module):
         if 'norm_weights' in kwargs:
             for i, weight in enumerate(kwargs['norm_weights']):
                 results.update({f"{key_prefix}_norm_weights_{i}": weight})
+        if 'lr' in kwargs:
+            results.update({"lr": kwargs["lr"]})
 
         for metric in self.metrics:
             log_key = f"{key_prefix}-{metric}"
@@ -137,7 +139,8 @@ class DownstreamExpert(nn.Module):
                 groundtruth=records["groundtruth"],
             )
 
-        wandb.log(results, step=global_step)
+        if to_wandb:
+            wandb.log(results, step=global_step)
         save_names = []
         for key, value in results.items():
             print(f"{split} {key}: {value}")

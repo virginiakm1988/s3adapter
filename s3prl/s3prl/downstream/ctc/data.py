@@ -22,7 +22,7 @@ def collect_audio_batch(batch, split, half_batch_size_wav_len=300000):
 
     # Make sure that batch size is reasonable
     first_len = audio_reader(str(batch[0][0])).size(0)
-    if split == 'train':
+    if 'train' in split:
         if first_len > half_batch_size_wav_len and len(batch) > 1:
             batch = batch[:len(batch)//2]
 
@@ -58,11 +58,12 @@ def create_dataset(split, tokenizer, name, bucketing, batch_size, **kwargs):
     else:
         raise NotImplementedError
 
-    if split == 'train':
+    if 'train' in split:
         kwargs["ratio"] = 1.0
         kwargs["offset"] = 0
         loader_bs = 1 if bucketing else batch_size
         bucket_size = batch_size if bucketing else 1
+        print(f'loader_bs: {loader_bs}, batch_size: {batch_size}')
         dataset = Dataset(kwargs['train'], tokenizer, bucket_size, **kwargs)
     else:
         loader_bs = EVAL_BATCH_SIZE
@@ -73,19 +74,29 @@ def create_dataset(split, tokenizer, name, bucketing, batch_size, **kwargs):
 
 def load_dataset(split, tokenizer, corpus, switch_ratio=0.3):
     ''' Prepare dataloader for training/validation'''
-    real_split = split
-    split = 'train' if split == 'switch' else split
+    # real_split = split
+    # split = 'train' if split == 'switch' else split
     collate_fn = partial(collect_audio_batch, split=split)
     num_workers = corpus.pop('num_workers', 12)
     dataset, loader_bs = create_dataset(split, tokenizer, num_workers=num_workers, **corpus)
     
     if split == 'train':
-        dataset = torch.utils.data.random_split(dataset, [1 - switch_ratio, switch_ratio])
-        dataset = dataset[int(real_split == 'switch')]
-        sampler = DistributedSampler(dataset) if (is_initialized() and len(dataset) > 0) else None
-        dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=(sampler is None and len(dataset) > 0),
-                                sampler=sampler, collate_fn=collate_fn, num_workers=num_workers)
+        train_dataset, switch_dataset = torch.utils.data.random_split(dataset, [1 - switch_ratio, switch_ratio])
+        
+        train_sampler = DistributedSampler(train_dataset) if (is_initialized() and len(train_dataset) > 0) else None
+        train_dataloader = DataLoader(train_dataset, batch_size=loader_bs, shuffle=(train_sampler is None and len(train_dataset) > 0),
+                                sampler=train_sampler, collate_fn=collate_fn, num_workers=num_workers)
+        
+        switch_sampler = DistributedSampler(switch_dataset) if (is_initialized() and len(switch_dataset) > 0) else None
+        switch_dataloader = DataLoader(switch_dataset, batch_size=loader_bs, shuffle=(switch_sampler is None and len(switch_dataset) > 0),
+                                sampler=switch_sampler, collate_fn=collate_fn, num_workers=num_workers)
+        
+        return {
+            "train": train_dataloader,
+            "switch": switch_dataloader
+        }
     else:
+        # dev set & test set
         dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=False,
                                 collate_fn=collate_fn, num_workers=num_workers)
     return dataloader

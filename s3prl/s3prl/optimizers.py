@@ -73,26 +73,46 @@ def get_Lamb_with_schedule(model_params, lr=2e-4, total_steps=20000, warmup_prop
 
 
 def get_Adam(model_params, lr=2e-4, **kwargs):
-    params = []
-    for m in model_params:
-        params += list(m.parameters())
+    try:
+        params = []
+        for m in model_params:
+            params += list(m.parameters())
+        Opt_class = getattr(torch.optim, torch_optim_name)
+    except AttributeError as e:
+        if "'Parameter' object has no attribute 'parameters'" in str(e):
+            params = model_params
+        else:
+            raise
     return Adam(params, lr=lr, betas=(0.9, 0.999))
 
 
 def get_AdamW(model_params, lr=2e-4, **kwargs):
-    params = []
-    for m in model_params:
-        params += list(m.parameters())
+    try:
+        params = []
+        for m in model_params:
+            params += list(m.parameters())
+        Opt_class = getattr(torch.optim, torch_optim_name)
+    except AttributeError as e:
+        if "'Parameter' object has no attribute 'parameters'" in str(e):
+            params = model_params
+        else:
+            raise
     optimizer = AdamW(params, lr=lr)
     return optimizer
 
 
 def get_TorchOptim(model_params, torch_optim_name, **kwargs):
-    params = []
-    for m in model_params:
-        params += list(m.parameters())
+    try:
+        params = []
+        for m in model_params:
+            params += list(m.parameters())
+    except AttributeError as e:
+        if "'Parameter' object has no attribute 'parameters'" in str(e):
+            params = model_params
+        else:
+            raise
+        
     Opt_class = getattr(torch.optim, torch_optim_name)
-
     kwargs.pop('total_steps')
     optim = Opt_class(params, **kwargs)
     return optim

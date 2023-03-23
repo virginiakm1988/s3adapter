@@ -8,8 +8,8 @@ adapter:
     path: [0, 1, 2]
     tau:
       type: linear
-      init_value: 5
-      stop_value: 0.5
+      init_value: 10
+      stop_value: 0.1
     strategy: global
     ratio: 0.3
     freq: 0.1  # 0~1

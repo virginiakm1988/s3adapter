@@ -26,9 +26,13 @@ def get_downstream_args():
     parser = argparse.ArgumentParser()
 
     # train or test for this experiment
-    parser.add_argument('-m', '--mode', choices=['train', 'evaluate', 'inference'], required=True)
+    parser.add_argument('-m', '--mode', choices=['train_stage1', 'train_stage2', 'evaluate', 'inference'], required=True)
     parser.add_argument('-t', '--evaluate_split', default='test')
     parser.add_argument('-o', '--override', help='Used to override args and config, this is at the highest priority')
+
+    # Enable weighted sum
+    parser.add_argument('-w', '--weighted_sum', action='store_true', default=False)
+    parser.add_argument('--stage2_ckpt', default=None)
 
     # distributed training
     parser.add_argument('--backend', default='nccl', help='The backend for distributed training')
@@ -147,7 +151,7 @@ def get_downstream_args():
         # overwrite args
         cannot_overwrite_args = [
             'mode', 'evaluate_split', 'override',
-            'backend', 'local_rank', 'past_exp',
+            'backend', 'local_rank', 'past_exp', 'ngpu', 'stage2_ckpt'
         ]
         args = update_args(args, ckpt['Args'], preserve_list=cannot_overwrite_args)
         os.makedirs(args.expdir, exist_ok=True)

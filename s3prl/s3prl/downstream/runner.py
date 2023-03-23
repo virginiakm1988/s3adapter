@@ -100,15 +100,24 @@ class Runner():
     """
     def __init__(self, args, config):
         self.args = args
+        show(self.args)
         self.config = config
-        self.config['runner']['total_steps'] //= self.args.ngpu
+        # self.config['runner']['total_steps'] //= self.args.ngpu
+        self.config['downstream_expert']['corpus']['batch_size'] //= self.args.ngpu
+        self.stage2_ckpt = torch.load(self.args.stage2_ckpt, map_location='cpu') if self.args.stage2_ckpt else {}
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
-        # print(self.init_ckpt.keys())
-        with open(args.upstream_adapter_config, 'r') as file:
-            self.adapterDict = yaml.load(file, Loader=yaml.FullLoader)
+        
+        if isinstance(args.upstream_adapter_config, str):   # In evaluate mode, this parameter will be dict.
+            with open(args.upstream_adapter_config, 'r') as file:
+                self.adapterDict = yaml.load(file, Loader=yaml.FullLoader)
+        else:
+            self.adapterDict = args.upstream_adapter_config
+        
         self.adapter_config = dict2obj(self.adapterDict)
         self.adapter_config.adapter.switch.tau.steps = self.config['runner']['total_steps']
         self.adapter_config.adapter.switch.tau.init_steps = self.init_ckpt.get('Step', 0)
+        self.adapter_config.adapter.switch.stage = 1 if self.args.mode == 'train_stage1' else 2
+        print(f'stage: {self.adapter_config.adapter.switch.stage}')
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.init_steps}")
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.steps}, {self.adapter_config.adapter.switch.tau.stop_value}")
         self.upstream = self._get_upstream()
@@ -134,15 +143,36 @@ class Runner():
                     model.load_state_dict(model_dict)
             if self.args.adapter:
                 adapter_weight = self.init_ckpt.get("adapter")
-                print('119', adapter_weight)
+                if self.stage2_ckpt:
+                    show(f'[Runner] - Loading {"Adapter"} switch_logits from the previous experiment')
+                    model_dict = model.state_dict()
+                    for para, value in self.stage2_ckpt["Upstream"].items():
+                        if 'switch' in para:
+                            model_dict.update({para: value})
+                            show(f'{para}: {value}')
+                    model.load_state_dict(model_dict)
                 if adapter_weight:
                     show(f'[Runner] - Loading {"Adapter"} weights from the previous experiment')
+                    print(adapter_weight.keys())
+                    # Deal with # of GPU mismatch between previous ckpt and current environment
+                    if any('module' in name for name in adapter_weight.keys()) and self.args.ngpu == 1: 
+                        show('[Runner] - Removing "module" in keys of the loaded model_dict')
+                        new_adapter_dict = {}
+                        for para, value in adapter_weight.items():
+                            new_adapter_dict[para[para.find(".") + 1:]] = value
+                        adapter_weight = new_adapter_dict
+                    elif all('module' not in name for name in adapter_weight.keys()) and self.args.gpu > 1:
+                        show('[Runner] - Adding "module" in keys of the loaded model_dict')
+                        new_adpater_dict = {}
+                        for para, value in adapter_weight.items():
+                            new_adapter_dict[f'module.{para}'] = value
+                        adapter_weight = new_adapter_dict
+                    
+                    # show(f'[Runner] - adapter_weight: {adapter_weight}')
                     model_dict = model.state_dict()
                     model_dict.update(adapter_weight)
                     model.load_state_dict(model_dict)
-
-
-
+                
     def _init_model(self, model, name, trainable, interfaces=None):
         for interface in interfaces or []:
             assert hasattr(model, interface), interface
@@ -216,7 +246,7 @@ class Runner():
         return self._init_model(
             model = model,
             name = 'Featurizer',
-            trainable = False,     # originally true
+            trainable = self.args.weighted_sum,     # originally true
             interfaces = ['output_dim', 'downsample_rate']
         )
 
@@ -241,7 +271,7 @@ class Runner():
         )
 
     ### add prompt
-    def _get_optimizer(self, model_params,prompt_lst):
+    def _get_optimizer(self, model_params, prompt_lst):
         if "prefix" in sys.argv[-1]:
             optimizer = get_prompt_optimizer(
             model_params, 
@@ -273,8 +303,7 @@ class Runner():
         with open(os.path.join(path, "README.md"), "w") as f:
             f.write(model_card)
 
-
-    def train(self):
+    def train_stage1(self):
         if is_leader_process():
             wandb.init(project=f'{self.args.upstream}-{self.args.downstream}')
             newArg = self.args
@@ -288,9 +317,11 @@ class Runner():
             wandb.define_metric("switch-switch-per", summary="min")
             wandb.define_metric("switch-switch-loss", summary="min")
         # trainable parameters and train/eval mode
-        
-        trainable_models = []
         trainable_paras = []
+        # Network weights
+        trainable_w_paras = []
+        # Architecture weights (switch)
+        trainable_a_paras = []
         additional_weight = [] # add prompt paras to optimizer
         for entry in self.all_entries:
             
@@ -308,22 +339,324 @@ class Runner():
 
             #### add adapters ##################
             if self.args.adapter != None and entry.name == "Upstream":
+                print(type(entry.model.named_parameters()))
+                print(entry.model.named_parameters())
+                for name, param in entry.model.named_parameters():
+                    if "adapter" in name or 'lora' in name:
+                        param.requires_grad = True
+                        if 'switch' in name:
+                            # print(f'switch, name: {name}, val: {param}')
+                            trainable_a_paras.append(param)
+                        else:
+                            trainable_w_paras.append(param)
+                    else:
+                        param.requires_grad = False
+                    
+                trainable_paras += list(additional_weight)         
+            elif entry.trainable:
+                linelogger.info(f"{entry.name}, {len(list(entry.model.parameters()))}")
+                trainable_w_paras += list(entry.model.parameters())
+            else:
+                print(f'in eval: {entry.name}')
+                entry.model.eval()
+        # optimizer
+        w_optimizer = self._get_optimizer(trainable_w_paras, [])
+        a_optimizer = self._get_optimizer(trainable_a_paras, [])
+
+        # scheduler
+        scheduler = None
+        if self.config.get('scheduler'):
+            scheduler = self._get_scheduler(w_optimizer)
+
+        # specaug
+        specaug = None
+        if self.config.get('specaug'):
+            linelogger.info(f'specaug is on!')
+            from .specaug import SpecAug
+            specaug = SpecAug(**self.config["specaug"])
+
+        # progress bar
+        tqdm_file = sys.stderr if is_leader_process() else open(os.devnull, 'w')
+        pbar = tqdm(total=self.config['runner']['total_steps'], dynamic_ncols=True, desc='overall', file=tqdm_file)
+        init_step = self.init_ckpt.get('Step')
+        if init_step:
+            pbar.n = init_step
+
+        # Tensorboard logging
+        if is_leader_process():
+            logger = SummaryWriter(self.args.expdir)
+
+        batch_ids = []
+        backward_steps = 0
+        records = defaultdict(list)
+        epoch = self.init_ckpt.get('Epoch', 0)
+        adapterModes = ['train', 'switch'] if len(self.adapter_config.adapter.switch.path) > 1 and \
+                                                not self.adapter_config.adapter.switch.first else ['switch', 'train']
+        
+        train_split = self.config['runner'].get("train_dataloader", "train")
+        try:
+            dataloaders = self.downstream.model.get_dataloader(train_split, self.args.mode, epoch=epoch)
+        except TypeError as e:
+            if "unexpected keyword argument 'epoch'" in str(e):
+                try:
+                    dataloaders = self.downstream.model.get_dataloader(train_split)
+                    for adapterMode in adapterModes:
+                        if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
+                            dataloaders[adapterMode].sampler.set_epoch(epoch)
+                except:
+                    raise
+            else:
+                raise
+        linelogger.info(f'dataset overlap: {len(set(dataloaders["train"].dataset.indices) & set(dataloaders["switch"].dataset.indices))}')
+        input_modes, cur_step, iters = {}, {}, {}
+        for adapterMode in adapterModes:
+            input_modes[adapterMode] = None
+            cur_step[adapterMode] = 0
+            iters[adapterMode] = iter(dataloaders[adapterMode])
+
+        # Log tau, switch logits & norm_weight from stage1_ckpt to wandb
+        if is_leader_process():
+            results = {}
+            for i, layer in enumerate(self.upstream.model.module.model.encoder.layers):
+                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                    results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+            print(self.featurizer.model.norm_weights)
+            for i, weight in enumerate(self.featurizer.model.norm_weights):
+                results.update({f"{train_split}_norm_weights_{i}": weight})
+            results.update({"lr": scheduler.get_last_lr()[0]})
+            wandb.log(results, step=pbar.n)
+            del results
+
+        while pbar.n < pbar.total:
+            for batch_id, (wavs, *others) in enumerate(tqdm(dataloaders['train'], dynamic_ncols=True, desc='train', file=tqdm_file)):
+                if pbar.n >= pbar.total:
+                    break
+                try:
+                    (valid_wavs, *valid_others) = next(iters['switch'])
+                except StopIteration:
+                    iters['switch'] = iter(dataloaders['switch'])
+                    (valid_wavs, *valid_others) = next(iters['switch'])
                 
+                input_modes['train'] = {'wavs': wavs, 'others': others, 'add_weight': []}
+                input_modes['switch'] = {'wavs': valid_wavs, 'others': valid_others, 'add_weight': []}
+
+                for adapterMode in adapterModes:
+                    optimizer, lr_scheduler, trainable_paras = \
+                        (w_optimizer, scheduler, trainable_w_paras) if adapterMode == 'train' else (a_optimizer, None, trainable_a_paras)
+                    
+                    # linelogger.info(f'Mode: {adapterMode}')
+                    for entry in self.all_entries:
+                        if self.args.adapter != False and entry.name == "Upstream":
+                            for name, param in entry.model.named_parameters():
+                                if "adapter" in name or 'lora' in name:
+                                    param.requires_grad = ("switch" in name) ^ (adapterMode == "train")
+                                    if param.requires_grad:
+                                        # linelogger.info(name)
+                                        input_modes[adapterMode]['add_weight'].append(param)
+                                    # print("Adapter!!", name, param.requires_grad)
+                                else:
+                                    param.requires_grad = False
+                        # if entry.name == "Featurizer":
+                        #     for name, param in entry.model.named_parameters():
+                        #         param.requires_grad = (adapterMode == "train")
+                    try:
+                        global_step = pbar.n + 1
+                        wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in input_modes[adapterMode]['wavs']]
+                        if self.upstream.trainable:
+                            features = self.upstream.model(wavs)
+                        else:
+                            with torch.no_grad():
+                                features = self.upstream.model(wavs)
+                        features = self.featurizer.model(wavs, features)
+                        if specaug:
+                            features, _ = specaug(features)
+                        loss = self.downstream.model(
+                            train_split,
+                            features, *input_modes[adapterMode]['others'],
+                            records = records,
+                        )
+                        batch_ids.append(batch_id * 2 + (adapterMode == 'switch'))
+
+                        gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
+                        (loss / gradient_accumulate_steps).backward()
+                        del loss
+
+                    except RuntimeError as e:
+                        if 'CUDA out of memory' in str(e):
+                            print(f'[Runner] - CUDA out of memory at step {global_step}, mode {adapterMode}')
+                            if is_initialized():
+                                raise
+                            with torch.cuda.device(self.args.device):
+                                torch.cuda.empty_cache()
+                            optimizer.zero_grad()
+                            continue
+                        else:
+                            raise
+                        
+                    # backward_steps += 1
+                    # if backward_steps % gradient_accumulate_steps > 0:
+                    #     continue
+
+                    # gradient clipping
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        trainable_paras, self.config['runner']['gradient_clipping'])
+
+                    # optimize
+                    if math.isnan(grad_norm):
+                        print(f'[Runner] - grad norm is NaN at step {global_step}, mode {adapterMode}')
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad()
+
+                    # adjust learning rate
+                    if lr_scheduler:
+                        lr_scheduler.step()
+                
+                # Reduce tau in switch
+                self.upstream.model.module.model.reduce_tau()
+
+                if not is_leader_process():
+                    batch_ids = []
+                    records = defaultdict(list)
+                    continue
+
+                # logging
+                if global_step % self.config['runner']['log_step'] == 0:
+                    self.downstream.model.log_records(
+                        train_split,
+                        records = records,
+                        logger = logger,
+                        global_step = global_step,
+                        batch_ids = batch_ids,
+                        total_batch_num = sum([len(dataloaders[m]) for m in adapterModes]),
+                        adapter_mode = adapterMode,
+                        layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
+                        norm_weights = self.featurizer.model.norm_weights,
+                        lr = scheduler.get_last_lr()[0]
+                    )
+                    batch_ids = []
+                    records = defaultdict(list)
+
+                # evaluation and save checkpoint
+                save_names = []
+
+                if global_step % self.config['runner']['eval_step'] == 0:
+                    for split in self.config['runner']['eval_dataloaders']:
+                        save_names += self.evaluate(split, logger, global_step)
+
+                if global_step % self.config['runner']['save_step'] == 0:
+                    def check_ckpt_num(directory):
+                        max_keep = self.config['runner']['max_keep']
+                        ckpt_pths = glob.glob(f'{directory}/states-*.ckpt')
+                        if len(ckpt_pths) >= max_keep:
+                            ckpt_pths = sorted(ckpt_pths, key=lambda pth: int(pth.split('-')[-1].split('.')[0]))
+                            for ckpt_pth in ckpt_pths[:len(ckpt_pths) - max_keep + 1]:
+                                os.remove(ckpt_pth)
+                    check_ckpt_num(self.args.expdir)
+                    save_names.append(f'states-{global_step}.ckpt')
+
+                if len(save_names) > 0:
+                    all_states = {
+                        'Optimizer': {"w_optimzer": w_optimizer.state_dict(), "a_optimizer": a_optimizer.state_dict()},
+                        'Step': global_step,
+                        'Epoch': epoch,
+                        'Args': self.args,
+                        'Config': self.config,
+                    }
+
+                    for entry in self.all_entries:
+                        if entry.trainable:
+                            all_states[entry.name] = get_model_state(entry.model)
+
+                        if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream": ###
+                            prompt_state = {}
+                            for name, param in entry.model.named_parameters():
+                                if "prompt" in name:
+                                    prompt_state[name] = param
+                            all_states["prompt"] = prompt_state
+                        if self.args.adapter and entry.name == "Upstream": ###
+                            adapter_state = {}
+                            for name, param in entry.model.named_parameters():
+                                if "adapter" in name:
+                                    adapter_state[name] = param
+                                if self.args.adapter == "bitfit":
+                                    if "bias" in name:
+                                        adapter_state[name] = param
+                            all_states["adapter"] = adapter_state
+
+                    if scheduler:
+                        all_states['Scheduler'] = scheduler.state_dict()
+
+                    if is_initialized():
+                        all_states['WorldSize'] = get_world_size()
+
+                    save_paths = [os.path.join(self.args.expdir, name) for name in save_names]
+                    tqdm.write(f'[Runner] - Save the checkpoint to:')
+                    for i, path in enumerate(save_paths):
+                        tqdm.write(f'{i + 1}. {path}')
+                        torch.save(all_states, path)
+
+                pbar.update(1)
+
+            epoch += 1
+            for adapterMode in adapterModes:
+                if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
+                            dataloaders[adapterMode].sampler.set_epoch(epoch)
+        pbar.close()
+
+        if self.args.push_to_hf_hub:
+            self.push_to_huggingface_hub()
+        if is_leader_process():
+            logger.close()
+            wandb.finish()
+
+    def train_stage2(self):
+        if is_leader_process():
+            wandb.init(project=f'{self.args.upstream}-{self.args.downstream}')
+            newArg = self.args
+            newArg.config = self.config
+            newArg.upstream_adapter_config = self.adapterDict
+            wandb.config.update(newArg)
+            wandb.define_metric("dev-per", summary="min")
+            wandb.define_metric("dev-loss", summary="min")
+            wandb.define_metric("train-per", summary="min")
+            wandb.define_metric("train-loss", summary="min")
+        
+        # trainable parameters and train/eval mode
+        trainable_models = []
+        trainable_paras = []
+        additional_weight = [] # add prompt paras to optimizer
+        for entry in self.all_entries:
+            
+            #### add the weight of prefix ###############
+            if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream":
+                for  name, param in entry.model.named_parameters():
+                    if "prompt" in name:
+                        additional_weight.append(param)
+                        param.requires_grad = True
+                        print("Prompt!!",name)
+                trainable_paras += list(additional_weight)
+
+            #### add adapters ##################
+            if self.args.adapter != None and entry.name == "Upstream":
+                adapter_param = 0
                 for  name, param in entry.model.named_parameters():
                         if "adapter" in name or 'lora' in name:
+                            additional_weight.append(param)
                             param.requires_grad = True
-                            if param.requires_grad:
-                                additional_weight.append(param)
-                            # print("Adapter!!", name, param.requires_grad)
+                            print("Adapter!!",name)
+                            adapter_param += param.nelement() 
+                            #print("Numbers of PARAMETER: %.2fM" % (total/1e6))
                         else:
                             param.requires_grad = False
                     
                 trainable_paras += list(additional_weight)
-                
-
+                print("total_adapter param")
+                print("Numbers of adapter PARAMETER: %.2fM" % (adapter_param/1e6))
 
             if entry.trainable:
-                linelogger.info(f"{entry.name}, {len(list(entry.model.parameters()))}")
+                entry.model.train()
                 trainable_models.append(entry.model)
                 trainable_paras += list(entry.model.parameters())
             else:
@@ -358,200 +691,183 @@ class Runner():
         backward_steps = 0
         records = defaultdict(list)
         epoch = self.init_ckpt.get('Epoch', 0)
-        adapterModes = ['train', 'switch'] if len(self.adapter_config.adapter.switch.path) > 1 and \
-                                                not self.adapter_config.adapter.switch.first else ['switch', 'train']
-        dataloaders = {'train': None, 'switch': None}
-        input_modes, cur_step, iters = {}, {}, {}
-        for adapterMode in adapterModes:
+        train_split = self.config['runner'].get("train_dataloader", "train")
+
+        # Log switch logits & norm_weight from stage1_ckpt to wandb
+        if is_leader_process():
+            results = {}
+            for i, layer in enumerate(self.upstream.model.module.model.encoder.layers):
+                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                    results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+            print(self.featurizer.model.norm_weights)
+            for i, weight in enumerate(self.featurizer.model.norm_weights):
+                results.update({f"{train_split}_norm_weights_{i}": weight})
+            wandb.log(results, step=pbar.n)
+            del results
+
+        while pbar.n < pbar.total:
             try:
-                dataloaders[adapterMode] = self.downstream.model.get_dataloader(adapterMode, epoch=epoch)
+                dataloader = self.downstream.model.get_dataloader(train_split, self.args.mode, epoch=epoch)
+                # print(f'mode: {self.args.mode}')
             except TypeError as e:
                 if "unexpected keyword argument 'epoch'" in str(e):
-                    dataloaders[adapterMode] = self.downstream.model.get_dataloader(adapterMode)
-                    if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
-                        dataloaders[adapterMode].sampler.set_epoch(epoch)
+                    dataloader = self.downstream.model.get_dataloader(train_split)
+                    if hasattr(dataloader, "sampler") and isinstance(dataloader.sampler, DistributedSampler):
+                        dataloader.sampler.set_epoch(epoch)
                 else:
                     raise
-            
-            input_modes[adapterMode] = None
-            cur_step[adapterMode] = 0
-            iters[adapterMode] = iter(dataloaders[adapterMode])
 
-        
-        while pbar.n < pbar.total:
-            for batch_id, (wavs, *others) in enumerate(tqdm(dataloaders['train'], dynamic_ncols=True, desc='train', file=tqdm_file)):
+            for batch_id, (wavs, *others) in enumerate(tqdm(dataloader, dynamic_ncols=True, desc='train', file=tqdm_file)):
+                # try/except block for forward/backward
                 try:
-                    (valid_wavs, *valid_others) = next(iters['switch'])
-                except StopIteration:
-                    iters['switch'] = iter(dataloaders['switch'])
-                    (valid_wavs, *valid_others) = next(iters['switch'])
-                input_modes['train'] = {'wavs': wavs, 'others': others, 'add_weight': []}
-                input_modes['switch'] = {'wavs': valid_wavs, 'others': valid_others, 'add_weight': []}
-                for adapterMode in adapterModes:
-                    train_split = self.config['runner'].get(f"{adapterMode}_dataloader", adapterMode)
-                    for entry in self.all_entries:
-                        if self.args.adapter != False and entry.name == "Upstream":
-                            for name, param in entry.model.named_parameters():
-                                if "adapter" in name or 'lora' in name:
-                                    param.requires_grad = ("switch" in name) ^ (adapterMode == "train")
-                                    if param.requires_grad:
-                                        # linelogger.info(name)
-                                        input_modes[adapterMode]['add_weight'].append(param)
-                                    # print("Adapter!!", name, param.requires_grad)
-                                else:
-                                    param.requires_grad = False
-                        if entry.name == "Featurizer":
-                            for name, param in entry.model.named_parameters():
-                                param.requires_grad = (adapterMode == "train")
-                    try:
-                        
-                        if pbar.n >= pbar.total:
-                            break
-                        global_step = pbar.n + 1
-                        wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in input_modes[adapterMode]['wavs']]
-                        if self.upstream.trainable:
-                            features = self.upstream.model(wavs)
-                        else:
-                            with torch.no_grad():
-                                features = self.upstream.model(wavs)
-                        features = self.featurizer.model(wavs, features)
-                        if specaug:
-                            features, _ = specaug(features)
-                        loss = self.downstream.model(
-                            train_split,
-                            features, *input_modes[adapterMode]['others'],
-                            records = records,
-                        )
-                        batch_ids.append(batch_id * 2 + (adapterMode == 'switch'))
+                    if pbar.n >= pbar.total:
+                        break
+                    global_step = pbar.n + 1
 
-                        gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
-                        (loss / gradient_accumulate_steps).backward()
-                        del loss
-
-                    except RuntimeError as e:
-                        if 'CUDA out of memory' in str(e):
-                            print(f'[Runner] - CUDA out of memory at step {global_step}')
-                            if is_initialized():
-                                raise
-                            with torch.cuda.device(self.args.device):
-                                torch.cuda.empty_cache()
-                            optimizer.zero_grad()
-                            continue
-                        else:
-                            raise
-                        
-                    backward_steps += 1
-                    if backward_steps % gradient_accumulate_steps > 0:
-                        continue
-
-                    # gradient clipping
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        trainable_paras, self.config['runner']['gradient_clipping'])
-
-                    # optimize
-                    if math.isnan(grad_norm):
-                        print(f'[Runner] - grad norm is NaN at step {global_step}')
+                    wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
+                    if self.upstream.trainable:
+                        features = self.upstream.model(wavs)
                     else:
-                        optimizer.step()
-                    optimizer.zero_grad()
+                        with torch.no_grad():
+                            features = self.upstream.model(wavs)
+                    features = self.featurizer.model(wavs, features)
 
-                    # adjust learning rate
-                    if scheduler:
-                        scheduler.step()
+                    if specaug:
+                        features, _ = specaug(features)
 
-                    if not is_leader_process():
-                        batch_ids = []
-                        records = defaultdict(list)
-                        continue
+                    loss = self.downstream.model(
+                        train_split,
+                        features, *others,
+                        records = records,
+                    )
+                    batch_ids.append(batch_id)
 
-                    # logging
-                    
-                    if global_step % self.config['runner']['log_step'] == 0:
-                        self.downstream.model.log_records(
-                            train_split,
-                            records = records,
-                            logger = logger,
-                            global_step = global_step,
-                            batch_ids = batch_ids,
-                            total_batch_num = sum([len(dataloaders[m]) for m in adapterModes]),
-                            adapter_mode = adapterMode,
-                            layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
-                            norm_weights = self.featurizer.model.norm_weights,
-                        )
-                        batch_ids = []
-                        records = defaultdict(list)
+                    gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
+                    (loss / gradient_accumulate_steps).backward()
+                    del loss
 
-                    # evaluation and save checkpoint
-                    save_names = []
-
-                    if global_step % self.config['runner']['eval_step'] == 0:
-                        for split in self.config['runner']['eval_dataloaders']:
-                            save_names += self.evaluate(split, logger, global_step)
-
-                    if global_step % self.config['runner']['save_step'] == 0:
-                        def check_ckpt_num(directory):
-                            max_keep = self.config['runner']['max_keep']
-                            ckpt_pths = glob.glob(f'{directory}/states-*.ckpt')
-                            if len(ckpt_pths) >= max_keep:
-                                ckpt_pths = sorted(ckpt_pths, key=lambda pth: int(pth.split('-')[-1].split('.')[0]))
-                                for ckpt_pth in ckpt_pths[:len(ckpt_pths) - max_keep + 1]:
-                                    os.remove(ckpt_pth)
-                        check_ckpt_num(self.args.expdir)
-                        save_names.append(f'states-{global_step}.ckpt')
-
-                    if len(save_names) > 0:
-                        all_states = {
-                            'Optimizer': optimizer.state_dict(),
-                            'Step': global_step,
-                            'Epoch': epoch,
-                            'Args': self.args,
-                            'Config': self.config,
-                        }
-
-                        for entry in self.all_entries:
-                            if entry.trainable:
-                                all_states[entry.name] = get_model_state(entry.model)
-
-                            if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream": ###
-                                    prompt_state = {}
-                                    for name, param in entry.model.named_parameters():
-                                        if "prompt" in name:
-                                            prompt_state[name] = param
-                                    all_states["prompt"] = prompt_state
-                            if self.args.adapter and entry.name == "Upstream": ###
-                                    adapter_state = {}
-                                    for name, param in entry.model.named_parameters():
-                                        if "adapter" in name:
-                                            adapter_state[name] = param
-                                        if self.args.adapter == "bitfit":
-                                            if "bias" in name:
-                                                adapter_state[name] = param
-                                    all_states["adapter"] = adapter_state
-
-                        if scheduler:
-                            all_states['Scheduler'] = scheduler.state_dict()
-
+                except RuntimeError as e:
+                    if 'CUDA out of memory' in str(e):
+                        print(f'[Runner] - CUDA out of memory at step {global_step}')
                         if is_initialized():
-                            all_states['WorldSize'] = get_world_size()
+                            raise
+                        with torch.cuda.device(self.args.device):
+                            torch.cuda.empty_cache()
+                        optimizer.zero_grad()
+                        continue
+                    else:
+                        raise
 
-                        save_paths = [os.path.join(self.args.expdir, name) for name in save_names]
-                        tqdm.write(f'[Runner] - Save the checkpoint to:')
-                        for i, path in enumerate(save_paths):
-                            tqdm.write(f'{i + 1}. {path}')
-                            torch.save(all_states, path)
+                # whether to accumulate gradient
+                backward_steps += 1
+                if gradient_accumulate_steps > 0 and backward_steps % gradient_accumulate_steps > 0:
+                    continue
 
-                    pbar.update(1)
+                # gradient clipping
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    trainable_paras, self.config['runner']['gradient_clipping'])
+
+                # optimize
+                if math.isnan(grad_norm):
+                    print(f'[Runner] - grad norm is NaN at step {global_step}')
+                else:
+                    optimizer.step()
+                optimizer.zero_grad()
+
+                # adjust learning rate
+                if scheduler:
+                    scheduler.step()
+
+                if not is_leader_process():
+                    batch_ids = []
+                    records = defaultdict(list)
+                    continue
+
+                # logging
+                if global_step % self.config['runner']['log_step'] == 0:
+                    self.downstream.model.log_records(
+                        train_split,
+                        records = records,
+                        logger = logger,
+                        global_step = global_step,
+                        batch_ids = batch_ids,
+                        total_batch_num = len(dataloader),
+                        layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
+                        norm_weights = self.featurizer.model.norm_weights,
+                    )
+                    batch_ids = []
+                    records = defaultdict(list)
+
+                # evaluation and save checkpoint
+                save_names = []
+
+                if global_step % self.config['runner']['eval_step'] == 0:
+                    for split in self.config['runner']['eval_dataloaders']:
+                        save_names += self.evaluate(split, logger, global_step)
+
+                if global_step % self.config['runner']['save_step'] == 0:
+                    def check_ckpt_num(directory):
+                        max_keep = self.config['runner']['max_keep']
+                        ckpt_pths = glob.glob(f'{directory}/states-*.ckpt')
+                        if len(ckpt_pths) >= max_keep:
+                            ckpt_pths = sorted(ckpt_pths, key=lambda pth: int(pth.split('-')[-1].split('.')[0]))
+                            for ckpt_pth in ckpt_pths[:len(ckpt_pths) - max_keep + 1]:
+                                os.remove(ckpt_pth)
+                    check_ckpt_num(self.args.expdir)
+                    save_names.append(f'states-{global_step}.ckpt')
+
+                if len(save_names) > 0:
+                    all_states = {
+                        'Optimizer': optimizer.state_dict(),
+                        'Step': global_step,
+                        'Epoch': epoch,
+                        'Args': self.args,
+                        'Config': self.config,
+                    }
+
+                    for entry in self.all_entries:
+                        if entry.trainable:
+                            all_states[entry.name] = get_model_state(entry.model)
+
+                        if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream": ###
+                                prompt_state = {}
+                                for name, param in entry.model.named_parameters():
+                                    if "prompt" in name:
+                                        prompt_state[name] = param
+                                all_states["prompt"] = prompt_state
+                        if self.args.adapter and entry.name == "Upstream": ###
+                                adapter_state = {}
+                                for name, param in entry.model.named_parameters():
+                                    if "adapter" in name:
+                                        adapter_state[name] = param
+                                    if self.args.adapter == "bitfit":
+                                        if "bias" in name:
+                                            adapter_state[name] = param
+                                all_states["adapter"] = adapter_state
+
+                    if scheduler:
+                        all_states['Scheduler'] = scheduler.state_dict()
+
+                    if is_initialized():
+                        all_states['WorldSize'] = get_world_size()
+
+                    save_paths = [os.path.join(self.args.expdir, name) for name in save_names]
+                    tqdm.write(f'[Runner] - Save the checkpoint to:')
+                    for i, path in enumerate(save_paths):
+                        tqdm.write(f'{i + 1}. {path}')
+                        torch.save(all_states, path)
+
+                pbar.update(1)
             epoch += 1
-            for adapterMode in adapterModes:
-                if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
-                            dataloaders[adapterMode].sampler.set_epoch(epoch)
+
         pbar.close()
 
         if self.args.push_to_hf_hub:
             self.push_to_huggingface_hub()
         if is_leader_process():
             logger.close()
-
+            wandb.finish()
 
     def evaluate(self, split=None, logger=None, global_step=0):
         """evaluate function will always be called on a single process even during distributed training"""
@@ -579,7 +895,7 @@ class Runner():
             entry.model.eval()
 
         # prepare data
-        dataloader = self.downstream.model.get_dataloader(split)
+        dataloader = self.downstream.model.get_dataloader(split, self.args.mode)
         evaluate_ratio = float(self.config["runner"].get("evaluate_ratio", 1))
         evaluate_steps = round(len(dataloader) * evaluate_ratio)
 
@@ -611,6 +927,7 @@ class Runner():
             global_step = global_step,
             batch_ids = batch_ids,
             total_batch_num = len(dataloader),
+            to_wandb = (self.args.mode != 'evaluate')
         )
         batch_ids = []
         records = defaultdict(list)

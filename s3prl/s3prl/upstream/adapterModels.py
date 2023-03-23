@@ -484,7 +484,7 @@ class AdapterSwitch(nn.Module):
         self.config = config
 
         # Keep the logits of probabilities as a separate parameters.
-        
+
         self.tau_step =  (self.config.tau.type == 'linear') * (self.config.tau.init_value - self.config.tau.stop_value) / self.config.tau.steps
         self.switch_temperature = ([self.config.tau.init_value - self.tau_step * self.config.tau.init_steps])
         self.hard = self.config.hard
@@ -511,8 +511,8 @@ class AdapterSwitch(nn.Module):
     def train(self, mode: bool = True):
         logger.info(f'{"train" if mode else "eval"} invoked')
         # self.switch_logits.requires_grad = mode
-        self.training = mode
-        if not mode:
+        self.training = (mode and self.config.stage != 2)
+        if not self.training:
             self.fixed_idx = self.get_arch()
             # self.soft_logits = torch.softmax(self.switch_logits / self.switch_temperature[0], -1)
             logger.info(f'path index after layer_{self.layer_idx}: {self.fixed_idx}')
@@ -542,8 +542,8 @@ class AdapterSwitch(nn.Module):
         x = x.transpose(0, 1)
         batch_size, seq_length, num_classes, hidden_dim_size = x.size()
         # print('477', self.switch_logits)
-        if not self.training:
-            return x[:,:, self.fixed_idx, :].transpose(0, 1)
+        if not self.training or self.config.stage == 2:
+            return x[:, :, self.fixed_idx, :].transpose(0, 1)
 
         if self.config.strategy == 'global':
             sample_size = [batch_size, num_classes]
@@ -553,7 +553,9 @@ class AdapterSwitch(nn.Module):
             sample_size = [batch_size, seq_length, hidden_dim_size, num_classes]
 
         # Sample from Gumbel.
-        self.reduce_tau()
+
+        # self.reduce_tau()
+
         g = self.gumbel.sample(sample_size).to(self.probs.device)
 
         # Compute the weights of the convex sum.
@@ -578,8 +580,10 @@ class AdapterSwitch(nn.Module):
         # print('458', x.shape, y.shape, y.transpose(0, 1).shape)
         return y.transpose(0, 1)
     def reduce_tau(self):
+        # tau_before = self.switch_temperature[0]
         self.switch_temperature[0] = max(self.config.tau.stop_value, self.switch_temperature[0] - self.tau_step)
-        
+        # logger.info(f"tau reduce from {tau_before} to {self.switch_temperature[0]}")
+
 class Adapter(nn.Module):
     def __init__(self) -> None:
         super().__init__()

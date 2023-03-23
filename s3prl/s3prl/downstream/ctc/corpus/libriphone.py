@@ -70,6 +70,10 @@ class LibriPhoneDataset(Dataset):
         self.file_list, self.text = zip(*[(f_name, txt)
                                           for f_name, txt in sorted(zip(file_list, text), reverse=not ascending, key=lambda x:len(x[1]))])
     
+    def get_file_list(self):
+        # print(self.file_list)
+        return self.file_list
+
     def __getitem__(self, index):
         if self.bucket_size > 1:
             index = min(len(self.file_list)-self.bucket_size, index)

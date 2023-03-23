@@ -608,3 +608,7 @@ class HubertModel(torch.nn.Module):
     def remove_pretraining_modules(self):
         self.target_glu = None
         self.final_proj = None
+
+    def reduce_tau(self):
+        for layer in self.encoder.layers:
+            layer.adapterswitch.reduce_tau()

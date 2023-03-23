@@ -2874,6 +2874,10 @@ class Wav2Vec2Model(nn.Module):
                 l for i, l in enumerate(self.encoder.layers) if i <= last_layer
             )
 
+    def reduce_tau(self):
+        for layer in self.encoder.layers:
+            layer.adapterswitch.reduce_tau()
+
 
 class ConvFeatureExtractionModel(nn.Module):
     def __init__(

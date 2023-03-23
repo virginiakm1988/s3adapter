@@ -59,6 +59,9 @@ class DownstreamExpert(nn.Module):
         self.objective = nn.CrossEntropyLoss()
         self.register_buffer('best_score', torch.zeros(1))
 
+        # AdapterConfig
+        self.adapterConfig = None
+
     def _get_train_dataloader(self, dataset):
         sampler = DistributedSampler(dataset) if is_initialized() else None
         return DataLoader(
@@ -76,6 +79,10 @@ class DownstreamExpert(nn.Module):
         )
 
     def get_train_dataloader(self):
+        return self._get_train_dataloader(self.train_dataset)
+
+    # DataLoader for stage 1 switch training
+    def get_switch_dataloader(self):
         return self._get_train_dataloader(self.train_dataset)
 
     def get_dev_dataloader(self):

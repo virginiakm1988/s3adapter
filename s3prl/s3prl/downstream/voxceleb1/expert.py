@@ -44,7 +44,9 @@ class DownstreamExpert(nn.Module):
 
         root_dir = Path(self.datarc['file_path'])
 
-        self.train_dataset = SpeakerClassifiDataset('train', root_dir, self.datarc['meta_data'], self.datarc['max_timestep'])
+        self.train_dataset_full = SpeakerClassifiDataset('train', root_dir, self.datarc['meta_data'], self.datarc['max_timestep'])
+        self.train_dataset = None
+        self.switch_dataset = None
         self.dev_dataset = SpeakerClassifiDataset('dev', root_dir, self.datarc['meta_data'])
         self.test_dataset = SpeakerClassifiDataset('test', root_dir, self.datarc['meta_data'])
         
@@ -61,6 +63,7 @@ class DownstreamExpert(nn.Module):
 
         # AdapterConfig
         self.adapterConfig = None
+        self.switch_ratio = 0.0
 
     def _get_train_dataloader(self, dataset):
         sampler = DistributedSampler(dataset) if is_initialized() else None
@@ -83,7 +86,7 @@ class DownstreamExpert(nn.Module):
 
     # DataLoader for stage 1 switch training
     def get_switch_dataloader(self):
-        return self._get_train_dataloader(self.train_dataset)
+        return self._get_train_dataloader(self.switch_dataset)
 
     def get_dev_dataloader(self):
         return self._get_eval_dataloader(self.dev_dataset)
@@ -92,8 +95,21 @@ class DownstreamExpert(nn.Module):
         return self._get_eval_dataloader(self.test_dataset)
 
     # Interface
-    def get_dataloader(self, mode):
-        return eval(f'self.get_{mode}_dataloader')()
+    def get_dataloader(self, split, mode, epoch=None):
+        assert self.adapter_config != None, "adapter_config is none!"
+        if split == 'train':
+            # reset the switch dataset ratio
+            self.switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1 and mode != 'train_stage2')
+            # devide the dataset
+            self.train_dataset, self.switch_dataset = \
+                torch.utils.data.random_split(self.train_dataset_full, [1 - self.switch_ratio, self.switch_ratio])
+            # return two dataloader
+            return {
+                'train': self.get_train_dataloader(),
+                'switch': self.get_switch_dataloader()
+            }
+        
+        return eval(f'self.get_{split}_dataloader')()
 
     # Interface
     def forward(self, mode, features, labels, filenames, records, **kwargs):

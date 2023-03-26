@@ -102,11 +102,17 @@ class Runner():
         self.args = args
         show(self.args)
         self.config = config
-        # self.config['runner']['total_steps'] //= self.args.ngpu
-        self.config['downstream_expert']['corpus']['batch_size'] //= self.args.ngpu
+        # self.config['downstream_expert']['corpus']['batch_size'] //= self.args.ngpu
         self.stage2_ckpt = torch.load(self.args.stage2_ckpt, map_location='cpu') if self.args.stage2_ckpt else {}
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
         
+        if self.init_ckpt.get('Config'):
+            self.config['runner']['total_steps'] = self.init_ckpt['Config']['runner']['total_steps']
+            self.config['runner']['gradient_accumulate_steps'] = self.init_ckpt['Config']['runner']['gradient_accumulate_steps']
+        else:
+            self.config['runner']['total_steps'] //= self.args.ngpu
+            self.config['runner']['gradient_accumulate_steps'] //= self.args.ngpu
+
         if isinstance(args.upstream_adapter_config, str):   # In evaluate mode, this parameter will be dict.
             with open(args.upstream_adapter_config, 'r') as file:
                 self.adapterDict = yaml.load(file, Loader=yaml.FullLoader)
@@ -127,10 +133,14 @@ class Runner():
 
 
     def _load_weight(self, model, name):
-        init_weight = self.init_ckpt.get(name)
+        init_weight = self.init_ckpt.get(name) if not 'optimizer' in name else self.init_ckpt.get('Optimizer')
+        
         if init_weight:
             show(f'[Runner] - Loading {name} weights from the previous experiment')
-            model.load_state_dict(init_weight)
+            if 'optimizer' in name:
+                model.load_state_dict(init_weight[name])
+            else:
+                model.load_state_dict(init_weight)
         
                 # load prompt weight
         if name == "Upstream":
@@ -153,20 +163,20 @@ class Runner():
                     model.load_state_dict(model_dict)
                 if adapter_weight:
                     show(f'[Runner] - Loading {"Adapter"} weights from the previous experiment')
-                    print(adapter_weight.keys())
+                    # print(adapter_weight.keys())
                     # Deal with # of GPU mismatch between previous ckpt and current environment
-                    if any('module' in name for name in adapter_weight.keys()) and self.args.ngpu == 1: 
+                    if any('module' in name for name in adapter_weight.keys()): #and self.args.ngpu == 1: 
                         show('[Runner] - Removing "module" in keys of the loaded model_dict')
                         new_adapter_dict = {}
                         for para, value in adapter_weight.items():
                             new_adapter_dict[para[para.find(".") + 1:]] = value
                         adapter_weight = new_adapter_dict
-                    elif all('module' not in name for name in adapter_weight.keys()) and self.args.gpu > 1:
-                        show('[Runner] - Adding "module" in keys of the loaded model_dict')
-                        new_adpater_dict = {}
-                        for para, value in adapter_weight.items():
-                            new_adapter_dict[f'module.{para}'] = value
-                        adapter_weight = new_adapter_dict
+                    # elif all('module' not in name for name in adapter_weight.keys()) and self.args.gpu > 1:
+                    #     show('[Runner] - Adding "module" in keys of the loaded model_dict')
+                    #     new_adpater_dict = {}
+                    #     for para, value in adapter_weight.items():
+                    #         new_adapter_dict[f'module.{para}'] = value
+                    #     adapter_weight = new_adapter_dict
                     
                     # show(f'[Runner] - adapter_weight: {adapter_weight}')
                     model_dict = model.state_dict()
@@ -271,7 +281,7 @@ class Runner():
         )
 
     ### add prompt
-    def _get_optimizer(self, model_params, prompt_lst):
+    def _get_optimizer(self, model_params, name, prompt_lst=None):
         if "prefix" in sys.argv[-1]:
             optimizer = get_prompt_optimizer(
             model_params, 
@@ -285,7 +295,7 @@ class Runner():
                 self.config['runner']['total_steps'],
                 self.config['optimizer']
             )
-        self._load_weight(optimizer, 'Optimizer')
+        self._load_weight(optimizer, name)
         return optimizer
 
 
@@ -359,9 +369,10 @@ class Runner():
             else:
                 print(f'in eval: {entry.name}')
                 entry.model.eval()
+
         # optimizer
-        w_optimizer = self._get_optimizer(trainable_w_paras, [])
-        a_optimizer = self._get_optimizer(trainable_a_paras, [])
+        w_optimizer = self._get_optimizer(trainable_w_paras, 'w_optimizer', [])
+        a_optimizer = self._get_optimizer(trainable_a_paras, 'a_optimizer', [])
 
         # scheduler
         scheduler = None
@@ -399,7 +410,7 @@ class Runner():
         except TypeError as e:
             if "unexpected keyword argument 'epoch'" in str(e):
                 try:
-                    dataloaders = self.downstream.model.get_dataloader(train_split)
+                    dataloaders = self.downstream.model.get_dataloader(train_split, self.args.mode)
                     for adapterMode in adapterModes:
                         if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
                             dataloaders[adapterMode].sampler.set_epoch(epoch)
@@ -407,7 +418,13 @@ class Runner():
                     raise
             else:
                 raise
+        
+        for adapterMode in adapterModes:
+            linelogger.info(f'dataset size of {adapterMode}: {len(dataloaders[adapterMode].dataset)}')
+        for adapterMode in adapterModes:
+            linelogger.info(f'data loader size of {adapterMode}: {len(dataloaders[adapterMode])}')
         linelogger.info(f'dataset overlap: {len(set(dataloaders["train"].dataset.indices) & set(dataloaders["switch"].dataset.indices))}')
+
         input_modes, cur_step, iters = {}, {}, {}
         for adapterMode in adapterModes:
             input_modes[adapterMode] = None
@@ -421,13 +438,15 @@ class Runner():
                 for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
                     results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
                 results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
-            print(self.featurizer.model.norm_weights)
+            
             for i, weight in enumerate(self.featurizer.model.norm_weights):
                 results.update({f"{train_split}_norm_weights_{i}": weight})
+
             results.update({"lr": scheduler.get_last_lr()[0]})
             wandb.log(results, step=pbar.n)
-            del results
 
+            del results
+        linelogger.info(f"gradient accumulate steps: {self.config['runner'].get('gradient_accumulate_steps')}")
         while pbar.n < pbar.total:
             for batch_id, (wavs, *others) in enumerate(tqdm(dataloaders['train'], dynamic_ncols=True, desc='train', file=tqdm_file)):
                 if pbar.n >= pbar.total:
@@ -445,7 +464,6 @@ class Runner():
                     optimizer, lr_scheduler, trainable_paras = \
                         (w_optimizer, scheduler, trainable_w_paras) if adapterMode == 'train' else (a_optimizer, None, trainable_a_paras)
                     
-                    # linelogger.info(f'Mode: {adapterMode}')
                     for entry in self.all_entries:
                         if self.args.adapter != False and entry.name == "Upstream":
                             for name, param in entry.model.named_parameters():
@@ -480,7 +498,7 @@ class Runner():
 
                         gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
                         (loss / gradient_accumulate_steps).backward()
-                        del loss
+                        del loss, wavs, features
 
                     except RuntimeError as e:
                         if 'CUDA out of memory' in str(e):
@@ -532,7 +550,7 @@ class Runner():
                         total_batch_num = sum([len(dataloaders[m]) for m in adapterModes]),
                         adapter_mode = adapterMode,
                         layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
-                        norm_weights = self.featurizer.model.norm_weights,
+                        norm_weights = self.featurizer.model.norm_weights.detach(),
                         lr = scheduler.get_last_lr()[0]
                     )
                     batch_ids = []
@@ -558,7 +576,7 @@ class Runner():
 
                 if len(save_names) > 0:
                     all_states = {
-                        'Optimizer': {"w_optimzer": w_optimizer.state_dict(), "a_optimizer": a_optimizer.state_dict()},
+                        'Optimizer': {"w_optimizer": w_optimizer.state_dict(), "a_optimizer": a_optimizer.state_dict()},
                         'Step': global_step,
                         'Epoch': epoch,
                         'Args': self.args,
@@ -745,7 +763,7 @@ class Runner():
 
                     gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
                     (loss / gradient_accumulate_steps).backward()
-                    del loss
+                    del loss, wavs, features
 
                 except RuntimeError as e:
                     if 'CUDA out of memory' in str(e):
@@ -916,10 +934,8 @@ class Runner():
                     batch_id = batch_id,
                 )
                 batch_ids.append(batch_id)
+                del wavs, features
         # logging
-        # wandb_log = {f'{split} acc': sum(records['acc']) / len(records['acc']),
-        #              f'{split} loss': sum(records['loss']) / len(records['loss'])}
-        # wandb.log(wandb_log, step=global_step)
         save_names = self.downstream.model.log_records(
             split,
             records = records,

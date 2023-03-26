@@ -151,8 +151,11 @@ def get_downstream_args():
         # overwrite args
         cannot_overwrite_args = [
             'mode', 'evaluate_split', 'override',
-            'backend', 'local_rank', 'past_exp', 'ngpu', 'stage2_ckpt'
+            'backend', 'local_rank', 'past_exp', 'device', 'stage2_ckpt'
         ]
+        if args.mode == 'evaluate':
+            cannot_overwrite_args.append('ngpu')
+        
         args = update_args(args, ckpt['Args'], preserve_list=cannot_overwrite_args)
         os.makedirs(args.expdir, exist_ok=True)
         args.init_ckpt = ckpt_pth

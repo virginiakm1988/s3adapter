@@ -19,13 +19,13 @@ optimizer:
   lr: 1.0e-4
 
 # # comment the whole scheduler config block to disable learning rate scheduling
-# scheduler:
-#   name: linear_schedule_with_warmup
-#   num_warmup_steps: 5000
+scheduler:
+  name: linear_schedule_with_warmup
+  num_warmup_steps: 5000
 
 downstream_expert: 
   datarc:
-    file_path: /path/to/VoxCeleb1
+    file_path: /work/u2752721/voxceleb1
     meta_data: ./downstream/voxceleb1/veri_test_class.txt
     num_workers: 12
     train_batch_size: 8

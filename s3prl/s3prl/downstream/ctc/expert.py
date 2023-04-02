@@ -53,7 +53,12 @@ class DownstreamExpert(nn.Module):
         self.register_buffer(
             "best_score", torch.ones(1) * (0 if self.metric_higher_better else 1 << 31)
         )
-        self.adapterConfig = None
+        # AdapterConfig
+        if 'adapterConfig' in kwargs:
+            self.adapterConfig = kwargs['adapterConfig']
+        else:
+            self.adapterConfig = None
+            print("[ctc/expert.py] 61: No Adapter Config")
 
     def _get_task_name(self):
         return f'ctc-{self.corpus["name"].lower()}'
@@ -111,7 +116,7 @@ class DownstreamExpert(nn.Module):
         return loss
 
     # interface
-    def log_records(self, split, records, logger, global_step, to_wandb=True, **kwargs):
+    def log_records(self, split, records, logger, global_step, **kwargs):
         results = {}
         key_prefix = f"{split}"
         # if 'adapter_mode' in kwargs:
@@ -139,7 +144,7 @@ class DownstreamExpert(nn.Module):
                 groundtruth=records["groundtruth"],
             )
 
-        if to_wandb:
+        if 'to_wandb' in kwargs and kwargs['to_wandb']:
             wandb.log(results, step=global_step)
         save_names = []
         for key, value in results.items():

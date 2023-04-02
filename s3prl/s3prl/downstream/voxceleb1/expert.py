@@ -15,6 +15,7 @@ import math
 import torch
 import random
 import pathlib
+import wandb
 #-------------#
 import torch
 import torch.nn as nn
@@ -42,6 +43,14 @@ class DownstreamExpert(nn.Module):
         self.modelrc = downstream_expert['modelrc']
         self.expdir = expdir
 
+        # AdapterConfig
+        if 'adapterConfig' in kwargs:
+            self.adapterConfig = kwargs['adapterConfig']
+        else:
+            self.adapterConfig = None
+            print("[voxceleb1/expert.py] 51: No Adapter Config")
+        self.switch_ratio = 0.0
+
         root_dir = Path(self.datarc['file_path'])
 
         self.train_dataset_full = SpeakerClassifiDataset('train', root_dir, self.datarc['meta_data'], self.datarc['max_timestep'])
@@ -55,15 +64,11 @@ class DownstreamExpert(nn.Module):
         self.projector = nn.Linear(upstream_dim, self.modelrc['projector_dim'])
         self.model = model_cls(
             input_dim = self.modelrc['projector_dim'],
-            output_dim = self.train_dataset.speaker_num,
+            output_dim = self.train_dataset_full.speaker_num,
             **model_conf,
         )
         self.objective = nn.CrossEntropyLoss()
         self.register_buffer('best_score', torch.zeros(1))
-
-        # AdapterConfig
-        self.adapterConfig = None
-        self.switch_ratio = 0.0
 
     def _get_train_dataloader(self, dataset):
         sampler = DistributedSampler(dataset) if is_initialized() else None
@@ -71,7 +76,7 @@ class DownstreamExpert(nn.Module):
             dataset, batch_size=self.datarc['train_batch_size'], 
             shuffle=(sampler is None), sampler=sampler,
             num_workers=self.datarc['num_workers'],
-            collate_fn=dataset.collate_fn
+            collate_fn=dataset.dataset.collate_fn
         )
 
     def _get_eval_dataloader(self, dataset):
@@ -96,13 +101,16 @@ class DownstreamExpert(nn.Module):
 
     # Interface
     def get_dataloader(self, split, mode, epoch=None):
-        assert self.adapter_config != None, "adapter_config is none!"
+        assert self.adapterConfig != None, "adapterConfig is none!"
         if split == 'train':
             # reset the switch dataset ratio
             self.switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1 and mode != 'train_stage2')
             # devide the dataset
             self.train_dataset, self.switch_dataset = \
                 torch.utils.data.random_split(self.train_dataset_full, [1 - self.switch_ratio, self.switch_ratio])
+
+            # Cast Subset to Dataset
+            # self.train_dataset, self.switch_dataset = self.train_dataset.dataset, self.switch_dataset.dataset
             # return two dataloader
             return {
                 'train': self.get_train_dataloader(),
@@ -135,6 +143,7 @@ class DownstreamExpert(nn.Module):
     # interface
     def log_records(self, mode, records, logger, global_step, **kwargs):
         save_names = []
+        results = {} # results update to wandb
         for key in ["acc", "loss"]:
             average = torch.FloatTensor(records[key]).mean().item()
             logger.add_scalar(
@@ -147,9 +156,25 @@ class DownstreamExpert(nn.Module):
                     print(f"{mode} {key}: {average}")
                     f.write(f'{mode} at step {global_step}: {average}\n')
                     if mode == 'dev' and average > self.best_score:
-                        self.best_score = torch.ones(1) * average
+                        self.best_score = torch.ones(1).to(self.best_score.device) * average
                         f.write(f'New best on {mode} at step {global_step}: {average}\n')
                         save_names.append(f'{mode}-best.ckpt')
+            results.update({f'{mode}-{key}': average})
+
+        if 'layers' in kwargs:
+            for i, layer in enumerate(kwargs['layers']):
+                # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
+                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                    results.update({f"layer_{i}/{mode}_{j}": logit.item()})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+        if 'norm_weights' in kwargs:
+            for i, weight in enumerate(kwargs['norm_weights']):
+                results.update({f"{mode}_norm_weights_{i}": weight})
+        if 'lr' in kwargs:
+            results.update({"lr": kwargs["lr"]})
+
+        if "to_wandb" in kwargs and kwargs['to_wandb']:
+            wandb.log(results, step=global_step)
 
         if mode in ["dev", "test"]:
             with open(Path(self.expdir) / f"{mode}_predict.txt", "w") as file:

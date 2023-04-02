@@ -105,13 +105,6 @@ class Runner():
         # self.config['downstream_expert']['corpus']['batch_size'] //= self.args.ngpu
         self.stage2_ckpt = torch.load(self.args.stage2_ckpt, map_location='cpu') if self.args.stage2_ckpt else {}
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
-        
-        if self.init_ckpt.get('Config'):
-            self.config['runner']['total_steps'] = self.init_ckpt['Config']['runner']['total_steps']
-            self.config['runner']['gradient_accumulate_steps'] = self.init_ckpt['Config']['runner']['gradient_accumulate_steps']
-        else:
-            self.config['runner']['total_steps'] //= self.args.ngpu
-            self.config['runner']['gradient_accumulate_steps'] //= self.args.ngpu
 
         if isinstance(args.upstream_adapter_config, str):   # In evaluate mode, this parameter will be dict.
             with open(args.upstream_adapter_config, 'r') as file:
@@ -142,9 +135,9 @@ class Runner():
             else:
                 model.load_state_dict(init_weight)
         
-                # load prompt weight
         if name == "Upstream":
             if "prefix" in sys.argv[-1]:
+                # load prompt weight
                 prompt_weight = self.init_ckpt.get("prompt")
                 if prompt_weight:
                     show(f'[Runner] - Loading {"Prompt"} weights from the previous experiment')
@@ -152,36 +145,38 @@ class Runner():
                     model_dict.update(prompt_weight)
                     model.load_state_dict(model_dict)
             if self.args.adapter:
-                adapter_weight = self.init_ckpt.get("adapter")
-                if self.stage2_ckpt:
-                    show(f'[Runner] - Loading {"Adapter"} switch_logits from the previous experiment')
+                upstream_weight = self.stage2_ckpt.get("Upstream")
+                if upstream_weight:
+                    show(f'[Runner] - Loading {"Adapter"} weights & switch logits from the previous experiment')
                     model_dict = model.state_dict()
-                    for para, value in self.stage2_ckpt["Upstream"].items():
-                        if 'switch' in para:
+                    for para, value in upstream_weight.items():
+                        if 'adapter' in para:
                             model_dict.update({para: value})
                             show(f'{para}: {value}')
                     model.load_state_dict(model_dict)
-                if adapter_weight:
-                    show(f'[Runner] - Loading {"Adapter"} weights from the previous experiment')
-                    # print(adapter_weight.keys())
-                    # Deal with # of GPU mismatch between previous ckpt and current environment
-                    if any('module' in name for name in adapter_weight.keys()): #and self.args.ngpu == 1: 
-                        show('[Runner] - Removing "module" in keys of the loaded model_dict')
-                        new_adapter_dict = {}
-                        for para, value in adapter_weight.items():
-                            new_adapter_dict[para[para.find(".") + 1:]] = value
-                        adapter_weight = new_adapter_dict
-                    # elif all('module' not in name for name in adapter_weight.keys()) and self.args.gpu > 1:
-                    #     show('[Runner] - Adding "module" in keys of the loaded model_dict')
-                    #     new_adpater_dict = {}
-                    #     for para, value in adapter_weight.items():
-                    #         new_adapter_dict[f'module.{para}'] = value
-                    #     adapter_weight = new_adapter_dict
+
+                upstream_weight = self.init_ckpt.get('Upstream')
+                if upstream_weight:
+                    # init ckpt is given
+                    assert self.stage2_ckpt == {}, \
+                        "init_ckpt and stage2_ckpt shouldn't be provided simultaneously."
                     
-                    # show(f'[Runner] - adapter_weight: {adapter_weight}')
                     model_dict = model.state_dict()
-                    model_dict.update(adapter_weight)
+                    for para, value in upstream_weight.items():
+                        if 'adapter' in para:
+                            model_dict.update({para: value})
+                    
+                    show(f'[Runner] - Loading {"Adapter"} weights from the previous experiment')
                     model.load_state_dict(model_dict)
+        elif name == 'Downstream':
+            downstream_weight = self.stage2_ckpt.get('Downstream')
+            if downstream_weight:
+                show(f'[Runner] - Loading downstream weights from the previous experiment')
+                model_dict = model.state_dict()
+                for para, value in downstream_weight.items():
+                    model_dict.update({para: value})
+                    show(f'{para}: {value}')
+                model.load_state_dict(model_dict)
                 
     def _init_model(self, model, name, trainable, interfaces=None):
         for interface in interfaces or []:
@@ -269,9 +264,10 @@ class Runner():
             upstream_dim = self.featurizer.model.output_dim,
             upstream_rate = self.featurizer.model.downsample_rate,
             **self.config,
-            **vars(self.args)
+            **vars(self.args),
+            adapterConfig = self.adapter_config
         ).to(self.args.device)
-        model.adapterConfig = self.adapter_config
+        # model.adapterConfig = self.adapter_config
 
         return self._init_model(
             model = model,
@@ -423,6 +419,7 @@ class Runner():
             linelogger.info(f'dataset size of {adapterMode}: {len(dataloaders[adapterMode].dataset)}')
         for adapterMode in adapterModes:
             linelogger.info(f'data loader size of {adapterMode}: {len(dataloaders[adapterMode])}')
+            linelogger.info(f'dataset # indice of {adapterMode}: {len(dataloaders[adapterMode].dataset.indices)}')
         linelogger.info(f'dataset overlap: {len(set(dataloaders["train"].dataset.indices) & set(dataloaders["switch"].dataset.indices))}')
 
         input_modes, cur_step, iters = {}, {}, {}
@@ -511,10 +508,12 @@ class Runner():
                             continue
                         else:
                             raise
-                        
-                    # backward_steps += 1
-                    # if backward_steps % gradient_accumulate_steps > 0:
-                    #     continue
+                    
+                    if adapterMode == 'train':
+                        # Only increment backward_steps in one of the adapterModes
+                        backward_steps += 1
+                    if backward_steps % gradient_accumulate_steps > 0:
+                        continue
 
                     # gradient clipping
                     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -531,9 +530,10 @@ class Runner():
                     if lr_scheduler:
                         lr_scheduler.step()
                 
-                # Reduce tau in switch
+                if backward_steps % gradient_accumulate_steps > 0:
+                    continue
+                
                 self.upstream.model.module.model.reduce_tau()
-
                 if not is_leader_process():
                     batch_ids = []
                     records = defaultdict(list)
@@ -551,7 +551,8 @@ class Runner():
                         adapter_mode = adapterMode,
                         layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
                         norm_weights = self.featurizer.model.norm_weights.detach(),
-                        lr = scheduler.get_last_lr()[0]
+                        lr = scheduler.get_last_lr()[0],
+                        to_wandb = True
                     )
                     batch_ids = []
                     records = defaultdict(list)
@@ -616,7 +617,7 @@ class Runner():
                         torch.save(all_states, path)
 
                 pbar.update(1)
-
+                
             epoch += 1
             for adapterMode in adapterModes:
                 if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
@@ -681,7 +682,7 @@ class Runner():
                 entry.model.eval()
 
         # optimizer
-        optimizer = self._get_optimizer(trainable_models,[])
+        optimizer = self._get_optimizer(trainable_models, "Optimizer", [])
 
         # scheduler
         scheduler = None
@@ -718,31 +719,29 @@ class Runner():
                 for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
                     results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
                 results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
-            print(self.featurizer.model.norm_weights)
-            for i, weight in enumerate(self.featurizer.model.norm_weights):
+            print(self.featurizer.model.module.norm_weights)
+            for i, weight in enumerate(self.featurizer.model.module.norm_weights):
                 results.update({f"{train_split}_norm_weights_{i}": weight})
             wandb.log(results, step=pbar.n)
             del results
 
         while pbar.n < pbar.total:
             try:
-                dataloader = self.downstream.model.get_dataloader(train_split, self.args.mode, epoch=epoch)
+                dataloaders = self.downstream.model.get_dataloader(train_split, self.args.mode, epoch=epoch)
                 # print(f'mode: {self.args.mode}')
             except TypeError as e:
                 if "unexpected keyword argument 'epoch'" in str(e):
-                    dataloader = self.downstream.model.get_dataloader(train_split)
-                    if hasattr(dataloader, "sampler") and isinstance(dataloader.sampler, DistributedSampler):
-                        dataloader.sampler.set_epoch(epoch)
+                    dataloaders = self.downstream.model.get_dataloader(train_split)
+                    if hasattr(dataloaders, "sampler") and isinstance(dataloaders.sampler, DistributedSampler):
+                        dataloaders.sampler.set_epoch(epoch)
                 else:
                     raise
-
-            for batch_id, (wavs, *others) in enumerate(tqdm(dataloader, dynamic_ncols=True, desc='train', file=tqdm_file)):
+            for batch_id, (wavs, *others) in enumerate(tqdm(dataloaders['train'], dynamic_ncols=True, desc='train', file=tqdm_file)):
                 # try/except block for forward/backward
                 try:
                     if pbar.n >= pbar.total:
                         break
                     global_step = pbar.n + 1
-
                     wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
                     if self.upstream.trainable:
                         features = self.upstream.model(wavs)
@@ -779,7 +778,7 @@ class Runner():
 
                 # whether to accumulate gradient
                 backward_steps += 1
-                if gradient_accumulate_steps > 0 and backward_steps % gradient_accumulate_steps > 0:
+                if backward_steps % gradient_accumulate_steps > 0:
                     continue
 
                 # gradient clipping
@@ -810,9 +809,10 @@ class Runner():
                         logger = logger,
                         global_step = global_step,
                         batch_ids = batch_ids,
-                        total_batch_num = len(dataloader),
+                        total_batch_num = len(dataloaders['train']),
                         layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
-                        norm_weights = self.featurizer.model.norm_weights,
+                        norm_weights = self.featurizer.model.module.norm_weights,
+                        to_wandb = True
                     )
                     batch_ids = []
                     records = defaultdict(list)

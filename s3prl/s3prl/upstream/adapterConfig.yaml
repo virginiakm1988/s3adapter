@@ -13,6 +13,7 @@ adapter:
     strategy: global
     ratio: 0.3
     # freq: 0.1  # 0~1
+    baseline: -1
 
   houlsby:
     input: false

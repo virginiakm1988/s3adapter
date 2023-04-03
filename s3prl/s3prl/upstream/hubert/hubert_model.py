@@ -612,3 +612,8 @@ class HubertModel(torch.nn.Module):
     def reduce_tau(self):
         for layer in self.encoder.layers:
             layer.adapterswitch.reduce_tau()
+    
+    def set_stage(self, stage: int):
+        assert stage == 1 or stage == 2, "stage most be 1 or 2"
+        for layer in self.encoder.layers:
+            layer.adapterswitch.config.stage = stage

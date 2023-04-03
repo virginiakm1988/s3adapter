@@ -493,7 +493,8 @@ class AdapterSwitch(nn.Module):
         self.training = True
         self.paths = self.config.path
         self.layer_idx = layer_idx
-        initial_logits = ([1. / len(self.paths)] * len(self.paths) if initial_logits is None else initial_logits)
+        initial_logits = ([1. / len(self.paths)] * len(self.paths) if self.config.baseline < 0 
+                            else [int(i == self.config.baseline) for i in range(len(self.paths))])
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.tensor(initial_logits))
                 )

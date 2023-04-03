@@ -405,16 +405,16 @@ class Runner():
         if is_leader_process():
             logger = SummaryWriter(self.args.expdir)
 
+        backward_steps = 0
+        batch_ids = []
+        records = defaultdict(list)
+        epoch = self.init_ckpt.get('Epoch', 0)        
+        train_split = self.config['runner'].get("train_dataloader", "train")
+
         if self.stage1_steps > 0:
             linelogger(f'train stage1 for {self.stage1_steps} steps')
-            batch_ids = []
-            backward_steps = 0
-            records = defaultdict(list)
-            epoch = self.init_ckpt.get('Epoch', 0)
             adapterModes = ['train', 'switch'] if len(self.adapter_config.adapter.switch.path) > 1 and \
-                                                    not self.adapter_config.adapter.switch.first else ['switch', 'train']
-            
-            train_split = self.config['runner'].get("train_dataloader", "train")
+                                                    not self.adapter_config.adapter.switch.first else ['switch', 'train']            
             try:
                 dataloaders = self.downstream.model.get_dataloader(train_split, 'train_stage1', epoch=epoch)
             except TypeError as e:
@@ -638,18 +638,33 @@ class Runner():
                                 dataloaders[adapterMode].sampler.set_epoch(epoch)
         
         if self.stage2_steps > 0:
-            linelogger(f'train stage1 for {self.stage2_steps} steps')
+            linelogger(f'train stage2 for {self.stage2_steps} steps')
             if self.args.stage2_weighted_sum:
                 # enable weighted sum in stage2
                 for entry in self.all_entries:
                     if entry.name == 'Featurizer':
                         entry.model.train()
-            
+            # change switch stage to 2 to perform one-hot forwarding
+            self.upstream.model.module.model.set_stage(2)
+
+            if is_leader_process():
+                results = {}
+                for i, layer in enumerate(self.upstream.model.module.model.encoder.layers):
+                    for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                        results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
+                    results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+                
+                for i, weight in enumerate(self.featurizer.model.norm_weights):
+                    results.update({f"{train_split}_norm_weights_{i}": weight})
+
+                results.update({"lr": scheduler.get_last_lr()[0]})
+                wandb.log(results, step=pbar.n)
+
+                del results
 
             while pbar.n < pbar.total:
                 try:
                     dataloaders = self.downstream.model.get_dataloader(train_split, 'train_stage2', epoch=epoch)
-                    # print(f'mode: {self.args.mode}')
                 except TypeError as e:
                     if "unexpected keyword argument 'epoch'" in str(e):
                         dataloaders = self.downstream.model.get_dataloader(train_split)
@@ -657,7 +672,7 @@ class Runner():
                             dataloaders.sampler.set_epoch(epoch)
                     else:
                         raise
-                for batch_id, (wavs, *others) in enumerate(tqdm(dataloaders['train'], dynamic_ncols=True, desc='train', file=tqdm_file)):
+                for batch_id, (wavs, *others) in enumerate(tqdm(dataloaders['train'], dynamic_ncols=True, desc='train_stage2', file=tqdm_file)):
                     # try/except block for forward/backward
                     try:
                         if pbar.n >= pbar.total:
@@ -800,7 +815,6 @@ class Runner():
                     pbar.update(1)
                 epoch += 1
                     
-
         pbar.close()
 
         if self.args.push_to_hf_hub:
@@ -826,7 +840,6 @@ class Runner():
         trainable_paras = []
         additional_weight = [] # add prompt paras to optimizer
         for entry in self.all_entries:
-            
             #### add the weight of prefix ###############
             if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream":
                 for  name, param in entry.model.named_parameters():

@@ -7,13 +7,21 @@ python run_downstream.py --adapter=houlsby -u hubert -d asr -m evaluate -t test-
 ops: sequential, skip, parallel, ex: ops = 2 only considers first 2 paths.
 python run_downstream.py --adapter=houlsby -u hubert -d ctc -m train -f -n hubert_ctc -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml
 
+** Stage 1 **
 ngpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
-python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d ctc -m train_stage1 -f -n hubert_ctc_stage1 -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml --ngpu ${ngpus}
+python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d ctc -m train_stage1 -f -n {exp dir name}_stage1 -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml --ngpu ${ngpus}
 
 ** Stage 2 **
-python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d ctc -m train_stage2 -f -n hubert_ctc_stage2 -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml --ngpu ${ngpus} -w --stage2_ckpt result/downstream/hubert_ctc_stage1/dev-best.ckpt
+python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d ctc -m train_stage2 -f -n {exp dir name}_stage2 -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml --ngpu ${ngpus} -w --stage2_ckpt result/downstream/{stage 1 exp name}/dev-best.ckpt
+
+** Testing **
+python3 run_downstream.py -m evaluate -t {testing split} -i {ckpt} -c downstream/ctc/libriphone.yaml --adapter=houlsby -u hubert -d ctc -uac upstream/adapterConfig.yaml -n {exp name}
 
 Note: 
 * -w : train weighted sum
 * --stage2_ckpt: ckpt from stage1, we'll only load switch logits to our Adapter Module
-* If using one GPU, remember to delete the .module in self.upstream.model.module.model....
+    * this parameter should not exists simultaneously with the --init_ckpt (-i)
+* If using only SINGLE GPU, remember to delete the .module in self.upstream.model.module.model.... #(還是我們用一張的時候也開DDP啊數碼寶貝...)
+
+Override:
+--overide config.runner.gradient_accumulate_steps=2,,config.xx.yy=zz

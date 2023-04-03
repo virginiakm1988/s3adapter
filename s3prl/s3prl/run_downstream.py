@@ -26,12 +26,16 @@ def get_downstream_args():
     parser = argparse.ArgumentParser()
 
     # train or test for this experiment
-    parser.add_argument('-m', '--mode', choices=['train_stage1', 'train_stage2', 'evaluate', 'inference'], required=True)
+    parser.add_argument('-m', '--mode', choices=['train', 'train_stage1', 'train_stage2', 'evaluate', 'inference'], required=True)
     parser.add_argument('-t', '--evaluate_split', default='test')
     parser.add_argument('-o', '--override', help='Used to override args and config, this is at the highest priority')
 
+    # number of steps in stage1 = stage1_ratio * total_steps
+    parser.add_argument('--stage1_ratio', type=float, default=0.0)
+
     # Enable weighted sum
-    parser.add_argument('-w', '--weighted_sum', action='store_true', default=False)
+    parser.add_argument('--stage1_weighted_sum', action='store_true', default=False)
+    parser.add_argument('--stage2_weighted_sum', action='store_false', default=True)
     parser.add_argument('--stage2_ckpt', default=None)
 
     # distributed training
@@ -199,7 +203,7 @@ def main():
         torch.cuda.set_device(args.local_rank)
         torch.distributed.init_process_group(args.backend)
 
-    if args.mode == 'train' and args.past_exp:
+    if 'train' in args.mode and args.past_exp:
         ckpt = torch.load(args.init_ckpt, map_location='cpu')
 
         now_use_ddp = is_initialized()

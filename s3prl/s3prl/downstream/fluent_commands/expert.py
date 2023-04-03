@@ -159,7 +159,7 @@ class DownstreamExpert(nn.Module):
                     print(f"{mode} {key}: {average}")
                     f.write(f'{mode} at step {global_step}: {average}\n')
                     if mode == 'dev' and average > self.best_score:
-                        self.best_score = torch.ones(1) * average
+                        self.best_score = torch.ones(1).to(self.best_score.device) * average
                         f.write(f'New best on {mode} at step {global_step}: {average}\n')
                         save_names.append(f'{mode}-best.ckpt')
 

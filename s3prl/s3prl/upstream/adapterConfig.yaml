@@ -11,7 +11,7 @@ adapter:
       init_value: 5
       stop_value: 0.5
     strategy: global
-    ratio: 0.3
+    ratio: 0.5
     # freq: 0.1  # 0~1
     baseline: -1
 

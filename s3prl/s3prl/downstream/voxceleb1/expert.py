@@ -91,7 +91,7 @@ class DownstreamExpert(nn.Module):
 
     # DataLoader for stage 1 switch training
     def get_switch_dataloader(self):
-        return self._get_train_dataloader(self.switch_dataset)
+        return None if len(self.switch_dataset) == 0 else self._get_train_dataloader(self.switch_dataset)
 
     def get_dev_dataloader(self):
         return self._get_eval_dataloader(self.dev_dataset)
@@ -100,7 +100,7 @@ class DownstreamExpert(nn.Module):
         return self._get_eval_dataloader(self.test_dataset)
 
     # Interface
-    def get_dataloader(self, split, mode, epoch=None):
+    def get_dataloader(self, split, mode=None, epoch=None):
         assert self.adapterConfig != None, "adapterConfig is none!"
         if split == 'train':
             # reset the switch dataset ratio

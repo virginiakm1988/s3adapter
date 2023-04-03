@@ -543,7 +543,9 @@ class AdapterSwitch(nn.Module):
         x = x.transpose(0, 1)
         batch_size, seq_length, num_classes, hidden_dim_size = x.size()
         # print('477', self.switch_logits)
+        self.switch_mode()
         if not self.training or self.config.stage == 2:
+            logger.info(f'{x.shape},  {self.fixed_idx} {x[:, :, self.fixed_idx, :].shape}')
             return x[:, :, self.fixed_idx, :].transpose(0, 1)
 
         if self.config.strategy == 'global':

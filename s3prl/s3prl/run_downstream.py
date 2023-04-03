@@ -32,7 +32,7 @@ def get_downstream_args():
 
     # number of steps in stage1 = stage1_ratio * total_steps
     parser.add_argument('--stage1_ratio', type=float, default=0.0)
-
+    parser.add_argument('--online', action='store_true')
     # Enable weighted sum
     parser.add_argument('--stage1_weighted_sum', action='store_true', default=False)
     parser.add_argument('--stage2_weighted_sum', action='store_false', default=True)

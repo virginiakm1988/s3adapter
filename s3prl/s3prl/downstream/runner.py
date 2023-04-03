@@ -18,7 +18,7 @@ from tensorboardX import SummaryWriter
 from torch.utils.data import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import is_initialized, get_rank, get_world_size
-
+from torch.distributed.elastic.multiprocessing.errors import record as ddprecod
 from s3prl import hub
 from s3prl.optimizers import get_optimizer
 from s3prl.schedulers import get_scheduler
@@ -32,6 +32,7 @@ from huggingface_hub import HfApi, HfFolder, Repository
 # add yaml support
 import yaml
 import logging
+import time
 linelogger = logging.getLogger(__name__)
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
@@ -114,7 +115,7 @@ class Runner():
         self.adapter_config = dict2obj(self.adapterDict)
         if self.args.mode == 'train':
             # train both stage1 and stage2
-            self.stage1_steps = self.args.stage1_ratio * self.config['runner']['total_steps'] * (self.adapterDict.adapter.switch.baseline >= 0) // 2
+            self.stage1_steps = self.args.stage1_ratio * self.config['runner']['total_steps'] * (self.adapter_config.adapter.switch.baseline < 0) // 2
             self.stage2_steps = self.config['runner']['total_steps'] - self.stage1_steps * 2
         elif self.args.mode == 'train_stage1':
             self.stage1_steps = self.config['runner']['total_steps']
@@ -170,7 +171,7 @@ class Runner():
                     model_dict = model.state_dict()
                     for para, value in upstream_weight.items():
                         if 'adapter' in para:
-                            if 'switch' in para and self.adapterDict.adapter.switch.baseline >= 0:
+                            if 'switch' in para and self.adapter_config.adapter.switch.baseline >= 0:
                                 continue
                             model_dict.update({para: value})
                     
@@ -321,17 +322,18 @@ class Runner():
         return self.downstream.model.get_dataloader(mode)
 
     def prepare_stage(self, stage: int):
-        self.upstream.model.module.model.config.stage = stage
+        self.upstream.model.module.model.set_stage(stage)
+            
         if stage == 1:
             if not self.args.stage1_weighted_sum:
                 self.featurizer.model.eval()   
         elif stage == 2:
-            self.downstream.model.adapterConfig.switch_ratio = 0
+            self.downstream.model.module.adapterConfig.adapter.switch.ratio = 0
             self.featurizer.model.train()
-
+    @ddprecod
     def train(self):
         if is_leader_process():
-            wandb.init(project=f'{self.args.upstream}-{self.args.downstream}')
+            wandb.init(project=f'{self.args.upstream}-{self.args.downstream}', mode="online" if self.args.online else "disabled")
             newArg = self.args
             newArg.config = self.config
             newArg.upstream_adapter_config = self.adapterDict
@@ -414,8 +416,7 @@ class Runner():
         train_split = self.config['runner'].get("train_dataloader", "train")
 
         linelogger.info(f'train stagez for {self.stage1_steps} steps')
-        adapterModes = ['train', 'switch'] if len(self.adapter_config.adapter.switch.path) > 1 and \
-                                                not self.adapter_config.adapter.switch.first else ['switch', 'train']            
+        adapterModes = ['train', 'switch'] if len(self.adapter_config.adapter.switch.path) > 1 else ['train']            
         
 
         # Log initial tau, switch logits & norm_weight to wandb
@@ -426,7 +427,7 @@ class Runner():
                     results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
                 results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
             
-            for i, weight in enumerate(self.featurizer.model.norm_weights):
+            for i, weight in enumerate(self.featurizer.model.module.norm_weights):
                 results.update({f"{train_split}_norm_weights_{i}": weight})
 
             results.update({"lr": scheduler.get_last_lr()[0]})
@@ -436,7 +437,7 @@ class Runner():
         linelogger.info(f"gradient accumulate steps: {self.config['runner'].get('gradient_accumulate_steps')}")
         self.prepare_stage(self.stage)
         try:
-            dataloaders = self.downstream.model.get_dataloader(train_split)
+            dataloaders = self.downstream.model.get_dataloader(train_split, epoch=epoch)
         except TypeError as e:
             if "unexpected keyword argument 'epoch'" in str(e):
                 try:
@@ -461,14 +462,30 @@ class Runner():
             input_modes[adapterMode] = None
             cur_step[adapterMode] = 0
             iters[adapterMode] = iter(dataloaders[adapterMode])
+            
+        self.stage_steps_prefix = [self.stage1_steps, self.config['runner']['total_steps']]
+
         while pbar.n < self.config['runner']['total_steps']:
             if pbar.n >= self.stage1_steps and self.stage == 1:
                 self.prepare_stage(2)
                 self.stage = 2
-                dataloaders = self.downstream.model.get_dataloader(train_split)
-                linelogger.info(f'dataset size of train: {len(dataloaders['train'].dataset)}')
+                try:
+                    dataloaders = self.downstream.model.get_dataloader(train_split, epoch=epoch)
+                except TypeError as e:
+                    if "unexpected keyword argument 'epoch'" in str(e):
+                        try:
+                            dataloaders = self.downstream.model.get_dataloader(train_split)
+                            for adapterMode in adapterModes:
+                                if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
+                                    dataloaders[adapterMode].sampler.set_epoch(epoch)
+                        except:
+                            raise
+                    else:
+                        raise
+            linelogger.info(f'dataset size of train: {len(dataloaders["train"].dataset)},. {pbar.n}')
+                
             for batch_id, (wavs, *others) in enumerate(tqdm(dataloaders['train'], dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)):
-                if pbar.n >= pbar.total:
+                if pbar.n >= self.stage_steps_prefix[self.stage - 1]:
                     break
                 
                 valid_wavs, valid_others = None, None
@@ -478,14 +495,18 @@ class Runner():
                     except StopIteration:
                         iters['switch'] = iter(dataloaders['switch'])
                         (valid_wavs, *valid_others) = next(iters['switch'])
+                    input_modes['switch'] = {'wavs': valid_wavs, 'others': valid_others, 'add_weight': []}
                 
                 input_modes['train'] = {'wavs': wavs, 'others': others, 'add_weight': []}
-                input_modes['switch'] = {'wavs': valid_wavs, 'others': valid_others, 'add_weight': []}
+                
 
-                for adapterMode in adapterModes[:self.stage]:
+                for adapterMode in adapterModes:
+                    if self.stage >= 2 and adapterMode != 'train':
+                        continue
+                    
                     optimizer, lr_scheduler, trainable_paras = \
                         (w_optimizer, scheduler, trainable_w_paras) if adapterMode == 'train' else (a_optimizer, None, trainable_a_paras)
-                    
+                    assert(not (adapterMode != 'train' and self.stage == 2))
                     for entry in self.all_entries:
                         if self.args.adapter != False and entry.name == "Upstream":
                             for name, param in entry.model.named_parameters():
@@ -502,12 +523,15 @@ class Runner():
                         #         param.requires_grad = (adapterMode == "train")
                     try:
                         global_step = pbar.n + 1
+                        
                         wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in input_modes[adapterMode]['wavs']]
+                        linelogger.info(f"!!!!!{adapterMode} = = {self.stage}, {(wavs[0]).shape}, {wavs[0].device}")                        
                         if self.upstream.trainable:
                             features = self.upstream.model(wavs)
                         else:
                             with torch.no_grad():
                                 features = self.upstream.model(wavs)
+                                
                         features = self.featurizer.model(wavs, features)
                         if specaug:
                             features, _ = specaug(features)
@@ -576,7 +600,7 @@ class Runner():
                         total_batch_num = sum([len(dataloaders[m]) for m in adapterModes]),
                         adapter_mode = adapterMode,
                         layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
-                        norm_weights = self.featurizer.model.norm_weights.detach(),
+                        norm_weights = self.featurizer.model.module.norm_weights.detach(),
                         lr = scheduler.get_last_lr()[0],
                         to_wandb = True
                     )
@@ -645,9 +669,11 @@ class Runner():
                 pbar.update(1)
                 
             epoch += 1
+            
             for adapterMode in adapterModes:
                 if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
                             dataloaders[adapterMode].sampler.set_epoch(epoch)
+            
            
         pbar.close()
 
@@ -657,261 +683,7 @@ class Runner():
             logger.close()
             wandb.finish()
 
-    def train_stage2(self):
-        if is_leader_process():
-            wandb.init(project=f'{self.args.upstream}-{self.args.downstream}')
-            newArg = self.args
-            newArg.config = self.config
-            newArg.upstream_adapter_config = self.adapterDict
-            wandb.config.update(newArg)
-            wandb.define_metric("dev-per", summary="min")
-            wandb.define_metric("dev-loss", summary="min")
-            wandb.define_metric("train-per", summary="min")
-            wandb.define_metric("train-loss", summary="min")
-        
-        # trainable parameters and train/eval mode
-        trainable_models = []
-        trainable_paras = []
-        additional_weight = [] # add prompt paras to optimizer
-        for entry in self.all_entries:
-            #### add the weight of prefix ###############
-            if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream":
-                for  name, param in entry.model.named_parameters():
-                    if "prompt" in name:
-                        additional_weight.append(param)
-                        param.requires_grad = True
-                        print("Prompt!!",name)
-                trainable_paras += list(additional_weight)
 
-            #### add adapters ##################
-            if self.args.adapter != None and entry.name == "Upstream":
-                adapter_param = 0
-                for  name, param in entry.model.named_parameters():
-                        if "adapter" in name or 'lora' in name:
-                            additional_weight.append(param)
-                            param.requires_grad = True
-                            print("Adapter!!",name)
-                            adapter_param += param.nelement() 
-                            #print("Numbers of PARAMETER: %.2fM" % (total/1e6))
-                        else:
-                            param.requires_grad = False
-                    
-                trainable_paras += list(additional_weight)
-                print("total_adapter param")
-                print("Numbers of adapter PARAMETER: %.2fM" % (adapter_param/1e6))
-
-            if entry.trainable:
-                entry.model.train()
-                trainable_models.append(entry.model)
-                trainable_paras += list(entry.model.parameters())
-            else:
-                entry.model.eval()
-
-        # optimizer
-        optimizer = self._get_optimizer(trainable_models, "Optimizer", [])
-
-        # scheduler
-        scheduler = None
-        if self.config.get('scheduler'):
-            scheduler = self._get_scheduler(optimizer)
-
-        # specaug
-        specaug = None
-        if self.config.get('specaug'):
-            from .specaug import SpecAug
-            specaug = SpecAug(**self.config["specaug"])
-
-        # progress bar
-        tqdm_file = sys.stderr if is_leader_process() else open(os.devnull, 'w')
-        pbar = tqdm(total=self.config['runner']['total_steps'], dynamic_ncols=True, desc='overall', file=tqdm_file)
-        init_step = self.init_ckpt.get('Step')
-        if init_step:
-            pbar.n = init_step
-
-        # Tensorboard logging
-        if is_leader_process():
-            logger = SummaryWriter(self.args.expdir)
-
-        batch_ids = []
-        backward_steps = 0
-        records = defaultdict(list)
-        epoch = self.init_ckpt.get('Epoch', 0)
-        train_split = self.config['runner'].get("train_dataloader", "train")
-
-        # Log switch logits & norm_weight from stage1_ckpt to wandb
-        if is_leader_process():
-            results = {}
-            for i, layer in enumerate(self.upstream.model.module.model.encoder.layers):
-                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
-                    results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
-                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
-            print(self.featurizer.model.norm_weights)
-            for i, weight in enumerate(self.featurizer.model.norm_weights):
-                results.update({f"{train_split}_norm_weights_{i}": weight})
-            wandb.log(results, step=pbar.n)
-            del results
-
-        while pbar.n < pbar.total:
-            try:
-                dataloaders = self.downstream.model.get_dataloader(train_split, self.args.mode, epoch=epoch)
-                # print(f'mode: {self.args.mode}')
-            except TypeError as e:
-                if "unexpected keyword argument 'epoch'" in str(e):
-                    dataloaders = self.downstream.model.get_dataloader(train_split)
-                    if hasattr(dataloaders, "sampler") and isinstance(dataloaders.sampler, DistributedSampler):
-                        dataloaders.sampler.set_epoch(epoch)
-                else:
-                    raise
-            for batch_id, (wavs, *others) in enumerate(tqdm(dataloaders['train'], dynamic_ncols=True, desc='train', file=tqdm_file)):
-                # try/except block for forward/backward
-                try:
-                    if pbar.n >= pbar.total:
-                        break
-                    global_step = pbar.n + 1
-                    wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
-                    if self.upstream.trainable:
-                        features = self.upstream.model(wavs)
-                    else:
-                        with torch.no_grad():
-                            features = self.upstream.model(wavs)
-                    features = self.featurizer.model(wavs, features)
-
-                    if specaug:
-                        features, _ = specaug(features)
-
-                    loss = self.downstream.model(
-                        train_split,
-                        features, *others,
-                        records = records,
-                    )
-                    batch_ids.append(batch_id)
-
-                    gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
-                    (loss / gradient_accumulate_steps).backward()
-                    del loss, wavs, features
-
-                except RuntimeError as e:
-                    if 'CUDA out of memory' in str(e):
-                        print(f'[Runner] - CUDA out of memory at step {global_step}')
-                        if is_initialized():
-                            raise
-                        with torch.cuda.device(self.args.device):
-                            torch.cuda.empty_cache()
-                        optimizer.zero_grad()
-                        continue
-                    else:
-                        raise
-
-                # whether to accumulate gradient
-                backward_steps += 1
-                if backward_steps % gradient_accumulate_steps > 0:
-                    continue
-
-                # gradient clipping
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    trainable_paras, self.config['runner']['gradient_clipping'])
-
-                # optimize
-                if math.isnan(grad_norm):
-                    print(f'[Runner] - grad norm is NaN at step {global_step}')
-                else:
-                    optimizer.step()
-                optimizer.zero_grad()
-
-                # adjust learning rate
-                if scheduler:
-                    scheduler.step()
-
-                if not is_leader_process():
-                    batch_ids = []
-                    records = defaultdict(list)
-                    continue
-
-                # logging
-                if global_step % self.config['runner']['log_step'] == 0:
-                    self.downstream.model.log_records(
-                        train_split,
-                        records = records,
-                        logger = logger,
-                        global_step = global_step,
-                        batch_ids = batch_ids,
-                        total_batch_num = len(dataloaders['train']),
-                        layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
-                        norm_weights = self.featurizer.model.norm_weights,
-                        to_wandb = True
-                    )
-                    batch_ids = []
-                    records = defaultdict(list)
-
-                # evaluation and save checkpoint
-                save_names = []
-
-                if global_step % self.config['runner']['eval_step'] == 0:
-                    for split in self.config['runner']['eval_dataloaders']:
-                        save_names += self.evaluate(split, logger, global_step)
-
-                if global_step % self.config['runner']['save_step'] == 0:
-                    def check_ckpt_num(directory):
-                        max_keep = self.config['runner']['max_keep']
-                        ckpt_pths = glob.glob(f'{directory}/states-*.ckpt')
-                        if len(ckpt_pths) >= max_keep:
-                            ckpt_pths = sorted(ckpt_pths, key=lambda pth: int(pth.split('-')[-1].split('.')[0]))
-                            for ckpt_pth in ckpt_pths[:len(ckpt_pths) - max_keep + 1]:
-                                os.remove(ckpt_pth)
-                    check_ckpt_num(self.args.expdir)
-                    save_names.append(f'states-{global_step}.ckpt')
-
-                if len(save_names) > 0:
-                    all_states = {
-                        'Optimizer': optimizer.state_dict(),
-                        'Step': global_step,
-                        'Epoch': epoch,
-                        'Args': self.args,
-                        'Config': self.config,
-                    }
-
-                    for entry in self.all_entries:
-                        if entry.trainable:
-                            all_states[entry.name] = get_model_state(entry.model)
-
-                        if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream": ###
-                                prompt_state = {}
-                                for name, param in entry.model.named_parameters():
-                                    if "prompt" in name:
-                                        prompt_state[name] = param
-                                all_states["prompt"] = prompt_state
-                        if self.args.adapter and entry.name == "Upstream": ###
-                                adapter_state = {}
-                                for name, param in entry.model.named_parameters():
-                                    if "adapter" in name:
-                                        adapter_state[name] = param
-                                    if self.args.adapter == "bitfit":
-                                        if "bias" in name:
-                                            adapter_state[name] = param
-                                all_states["adapter"] = adapter_state
-
-                    if scheduler:
-                        all_states['Scheduler'] = scheduler.state_dict()
-
-                    if is_initialized():
-                        all_states['WorldSize'] = get_world_size()
-
-                    save_paths = [os.path.join(self.args.expdir, name) for name in save_names]
-                    tqdm.write(f'[Runner] - Save the checkpoint to:')
-                    for i, path in enumerate(save_paths):
-                        tqdm.write(f'{i + 1}. {path}')
-                        torch.save(all_states, path)
-
-                pbar.update(1)
-            epoch += 1
-
-        pbar.close()
-
-        if self.args.push_to_hf_hub:
-            self.push_to_huggingface_hub()
-        if is_leader_process():
-            logger.close()
-            wandb.finish()
 
     def evaluate(self, split=None, logger=None, global_step=0):
         """evaluate function will always be called on a single process even during distributed training"""

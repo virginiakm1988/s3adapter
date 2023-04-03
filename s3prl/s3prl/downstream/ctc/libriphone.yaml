@@ -1,11 +1,11 @@
 runner:
-  total_steps: 100000
+  total_steps: 40
   gradient_clipping: 1
   gradient_accumulate_steps: 2
 
-  log_step: 100
-  eval_step: 1000
-  save_step: 100
+  log_step: 10
+  eval_step: 100
+  save_step: 10
   max_keep: 2
   eval_dataloaders:
     - dev
@@ -19,7 +19,7 @@ optimizer:
 # to disable learning rate scheduling
 scheduler:
   name: linear_schedule_with_warmup
-  num_warmup_steps: 1400
+  num_warmup_steps: 10
 
 # comment the whole specaug config block
 # to disable specaug on representation

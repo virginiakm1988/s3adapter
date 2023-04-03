@@ -34,8 +34,8 @@ def get_downstream_args():
     parser.add_argument('--stage1_ratio', type=float, default=0.0)
 
     # Enable weighted sum
-    parser.add_argument('--stage1_weighted_sum', action='store_true', default=False)
-    parser.add_argument('--stage2_weighted_sum', action='store_false', default=True)
+    parser.add_argument('-w1', '--stage1_weighted_sum', action='store_true', default=False)
+    parser.add_argument('-w2', '--stage2_weighted_sum', action='store_true', default=False)
     parser.add_argument('--stage2_ckpt', default=None)
 
     # distributed training

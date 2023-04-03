@@ -413,7 +413,7 @@ class Runner():
         epoch = self.init_ckpt.get('Epoch', 0)        
         train_split = self.config['runner'].get("train_dataloader", "train")
 
-        linelogger(f'train stage1 for {self.stage1_steps} steps')
+        linelogger.info(f'train stagez for {self.stage1_steps} steps')
         adapterModes = ['train', 'switch'] if len(self.adapter_config.adapter.switch.path) > 1 and \
                                                 not self.adapter_config.adapter.switch.first else ['switch', 'train']            
         
@@ -745,8 +745,8 @@ class Runner():
                 for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
                     results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
                 results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
-            print(self.featurizer.model.module.norm_weights)
-            for i, weight in enumerate(self.featurizer.model.module.norm_weights):
+            print(self.featurizer.model.norm_weights)
+            for i, weight in enumerate(self.featurizer.model.norm_weights):
                 results.update({f"{train_split}_norm_weights_{i}": weight})
             wandb.log(results, step=pbar.n)
             del results
@@ -837,7 +837,7 @@ class Runner():
                         batch_ids = batch_ids,
                         total_batch_num = len(dataloaders['train']),
                         layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
-                        norm_weights = self.featurizer.model.module.norm_weights,
+                        norm_weights = self.featurizer.model.norm_weights,
                         to_wandb = True
                     )
                     batch_ids = []

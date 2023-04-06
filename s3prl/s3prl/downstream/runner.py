@@ -115,7 +115,7 @@ class Runner():
         self.adapter_config = dict2obj(self.adapterDict)
         if self.args.mode == 'train':
             # train both stage1 and stage2
-            self.stage1_steps = self.args.stage1_ratio * self.config['runner']['total_steps'] * (self.adapter_config.adapter.switch.baseline < 0) // 2
+            self.stage1_steps = int(self.args.stage1_ratio * self.config['runner']['total_steps'] * (self.adapter_config.adapter.switch.baseline < 0) // 2)
             self.stage2_steps = self.config['runner']['total_steps'] - self.stage1_steps * 2
         elif self.args.mode == 'train_stage1':
             self.stage1_steps = self.config['runner']['total_steps']
@@ -126,12 +126,23 @@ class Runner():
         else:
             self.stage1_steps = self.stage2_steps = 0
 
-        
+
+        if is_leader_process():
+            print("*******************************************")
+            print()
+            print(f"(stage1_steps, stage2_steps, total_steps) = ({self.stage1_steps}, {self.stage2_steps}, {self.config['runner']['total_steps']})")
+            print("A step in stage1 will update both network weights and switch logits. As a result, the effective # of steps equals to 2.")
+            print(f"2 * stage1_steps + stage2_steps = 2 * {self.stage1_steps} + {self.stage2_steps} = {2 * self.stage1_steps + self.stage2_steps} = total steps")
+            print()
+            print("*******************************************")
+
+        self.config['runner']['total_steps'] = self.stage1_steps + self.stage2_steps
+
         self.adapter_config.adapter.switch.tau.steps = self.stage1_steps
         self.adapter_config.adapter.switch.tau.init_steps = self.init_ckpt.get('Step', 0)
         self.adapter_config.adapter.switch.stage = 1 + (self.adapter_config.adapter.switch.tau.init_steps >= self.stage1_steps)
         self.stage = self.adapter_config.adapter.switch.stage
-        print(f'stage: {self.adapter_config.adapter.switch.stage}')
+        
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.init_steps}")
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.steps}, {self.adapter_config.adapter.switch.tau.stop_value}")
         
@@ -326,7 +337,7 @@ class Runner():
             
         if stage == 1:
             if not self.args.stage1_weighted_sum:
-                self.featurizer.model.eval()   
+                self.featurizer.model.eval()
         elif stage == 2:
             self.downstream.model.module.adapterConfig.adapter.switch.ratio = 0
             self.featurizer.model.train()
@@ -415,7 +426,7 @@ class Runner():
         epoch = self.init_ckpt.get('Epoch', 0)        
         train_split = self.config['runner'].get("train_dataloader", "train")
 
-        linelogger.info(f'train stagez for {self.stage1_steps} steps')
+        linelogger.info(f'train stage for {self.stage1_steps} steps')
         adapterModes = ['train', 'switch'] if len(self.adapter_config.adapter.switch.path) > 1 else ['train']            
         
 
@@ -466,7 +477,7 @@ class Runner():
         self.stage_steps_prefix = [self.stage1_steps, self.config['runner']['total_steps']]
 
         while pbar.n < self.config['runner']['total_steps']:
-            if pbar.n >= self.stage1_steps and self.stage == 1:
+            if self.stage == 1 and pbar.n >= self.stage_steps_prefix[self.stage - 1]:
                 self.prepare_stage(2)
                 self.stage = 2
                 try:
@@ -482,8 +493,8 @@ class Runner():
                             raise
                     else:
                         raise
-            linelogger.info(f'dataset size of train: {len(dataloaders["train"].dataset)},. {pbar.n}')
-                
+
+            linelogger.info(f'dataset size of train: {len(dataloaders["train"].dataset)}, {pbar.n}')            
             for batch_id, (wavs, *others) in enumerate(tqdm(dataloaders['train'], dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)):
                 if pbar.n >= self.stage_steps_prefix[self.stage - 1]:
                     break
@@ -499,7 +510,6 @@ class Runner():
                 
                 input_modes['train'] = {'wavs': wavs, 'others': others, 'add_weight': []}
                 
-
                 for adapterMode in adapterModes:
                     if self.stage >= 2 and adapterMode != 'train':
                         continue
@@ -507,6 +517,7 @@ class Runner():
                     optimizer, lr_scheduler, trainable_paras = \
                         (w_optimizer, scheduler, trainable_w_paras) if adapterMode == 'train' else (a_optimizer, None, trainable_a_paras)
                     assert(not (adapterMode != 'train' and self.stage == 2))
+
                     for entry in self.all_entries:
                         if self.args.adapter != False and entry.name == "Upstream":
                             for name, param in entry.model.named_parameters():
@@ -518,20 +529,20 @@ class Runner():
                                     # print("Adapter!!", name, param.requires_grad)
                                 else:
                                     param.requires_grad = False
-                        # if entry.name == "Featurizer":
-                        #     for name, param in entry.model.named_parameters():
-                        #         param.requires_grad = (adapterMode == "train")
-                    try:
-                        global_step = pbar.n + 1
-                        
+                        if entry.name == "Featurizer":
+                            for name, param in entry.model.named_parameters():
+                                param.requires_grad = (self.stage == 1 and self.args.stage1_weighted_sum) \
+                                                        or (self.stage == 2 and self.args.stage2_weighted_sum)
+                    try:     
+                        global_step = pbar.n + 1                   
                         wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in input_modes[adapterMode]['wavs']]
-                        linelogger.info(f"!!!!!{adapterMode} = = {self.stage}, {(wavs[0]).shape}, {wavs[0].device}")                        
+                        # linelogger.info(f"!!!!!{adapterMode} = = {self.stage}, {(wavs[0]).shape}, {wavs[0].device}, {'parent' if is_leader_process() else 'child'}")                        
                         if self.upstream.trainable:
                             features = self.upstream.model(wavs)
                         else:
                             with torch.no_grad():
                                 features = self.upstream.model(wavs)
-                                
+
                         features = self.featurizer.model(wavs, features)
                         if specaug:
                             features, _ = specaug(features)
@@ -561,6 +572,7 @@ class Runner():
                     if adapterMode == 'train':
                         # Only increment backward_steps in one of the adapterModes
                         backward_steps += 1
+                    linelogger.info(f'backward steps = {backward_steps}, global_step = {global_step}, process = {"parent" if is_leader_process() else "child"}')
                     if backward_steps % gradient_accumulate_steps > 0:
                         continue
 
@@ -584,6 +596,9 @@ class Runner():
                 
                 if self.stage < 2:
                     self.upstream.model.module.model.reduce_tau()
+                
+                pbar.update(1)
+                
                 if not is_leader_process():
                     batch_ids = []
                     records = defaultdict(list)
@@ -597,7 +612,7 @@ class Runner():
                         logger = logger,
                         global_step = global_step,
                         batch_ids = batch_ids,
-                        total_batch_num = sum([len(dataloaders[m]) for m in adapterModes]),
+                        total_batch_num = len(dataloaders['train']),
                         adapter_mode = adapterMode,
                         layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
                         norm_weights = self.featurizer.model.module.norm_weights.detach(),
@@ -665,8 +680,6 @@ class Runner():
                     for i, path in enumerate(save_paths):
                         tqdm.write(f'{i + 1}. {path}')
                         torch.save(all_states, path)
-
-                pbar.update(1)
                 
             epoch += 1
             
@@ -674,7 +687,6 @@ class Runner():
                 if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
                             dataloaders[adapterMode].sampler.set_epoch(epoch)
             
-           
         pbar.close()
 
         if self.args.push_to_hf_hub:
@@ -682,7 +694,6 @@ class Runner():
         if is_leader_process():
             logger.close()
             wandb.finish()
-
 
 
     def evaluate(self, split=None, logger=None, global_step=0):

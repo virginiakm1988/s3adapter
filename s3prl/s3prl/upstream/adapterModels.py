@@ -545,7 +545,7 @@ class AdapterSwitch(nn.Module):
         # print('477', self.switch_logits)
         self.switch_mode()
         if not self.training or self.config.stage == 2:
-            logger.info(f'{x.shape},  {self.fixed_idx} {x[:, :, self.fixed_idx, :].shape}')
+            # logger.info(f'{x.shape},  {self.fixed_idx} {x[:, :, self.fixed_idx, :].shape}')
             return x[:, :, self.fixed_idx, :].transpose(0, 1)
 
         if self.config.strategy == 'global':

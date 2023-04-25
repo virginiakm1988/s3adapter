@@ -17,6 +17,8 @@ from torch.nn.utils.rnn import pad_sequence
 from ..model import *
 from .dataset import SpeechCommandsDataset, SpeechCommandsTestingDataset, CLASSES
 
+import wandb
+
 
 class DownstreamExpert(nn.Module):
     """
@@ -29,13 +31,19 @@ class DownstreamExpert(nn.Module):
         self.upstream_dim = upstream_dim
         self.datarc = downstream_expert["datarc"]
         self.modelrc = downstream_expert["modelrc"]
+        if 'adapterConfig' in kwargs:
+            self.adapterConfig = kwargs['adapterConfig']
+        else:
+            self.adapterConfig = None
+            print("[asr/expert.py] 105: No Adapter Config")
 
         train_list, valid_list = split_dataset(self.datarc["speech_commands_root"])
-        num_paths = int(sys.argv[-1].split('_')[-1])
+        num_paths = len(self.adapterConfig.adapter.switch.path)
         print('export 35', num_paths)
-        self.train_dataset = SpeechCommandsDataset(train_list['train'] + 
-                                                   train_list['eval'] * (num_paths == 1), **self.datarc)
-        self.switch_train_dataset = SpeechCommandsDataset(train_list['eval'], **self.datarc)
+        switch_ratio = self.adapterConfig.adapter.switch.ratio
+        full_train_dataset = SpeechCommandsDataset(train_list, **self.datarc)
+        self.train_dataset, self.switch_train_dataset = torch.utils.data.random_split(full_train_dataset, [1 - switch_ratio, switch_ratio])
+        # self.switch_train_dataset = SpeechCommandsDataset(train_list['eval'], **self.datarc)
         self.dev_dataset = SpeechCommandsDataset(valid_list, **self.datarc)
         self.test_dataset = SpeechCommandsTestingDataset(**self.datarc)
 
@@ -44,7 +52,7 @@ class DownstreamExpert(nn.Module):
         self.projector = nn.Linear(upstream_dim, self.modelrc['projector_dim'])
         self.model = model_cls(
             input_dim = self.modelrc['projector_dim'],
-            output_dim = self.train_dataset.class_num,
+            output_dim = full_train_dataset.class_num,
             **model_conf,
         )
 
@@ -52,18 +60,18 @@ class DownstreamExpert(nn.Module):
         self.expdir = expdir
         self.register_buffer('best_score', torch.zeros(1))
 
-    def _get_balanced_train_dataloader(self, dataset: SpeechCommandsDataset, drop_last=False):
+    def _get_balanced_train_dataloader(self, dataset: torch.utils.data.Subset, drop_last=False):
         if is_initialized():
-            sampler = DistributedSamplerWrapper(sampler)
-        sampler = WeightedRandomSampler(dataset.sample_weights, len(dataset.sample_weights))
-        
+            sampler = DistributedSamplerWrapper(dataset)
+        sample_weights = [dataset.dataset.sample_weights[i] for i in dataset.indices]
+        sampler = WeightedRandomSampler(sample_weights, len(dataset.dataset.sample_weights))
         return DataLoader(
             dataset,
             sampler=sampler,
             batch_size=self.datarc["batch_size"],
             drop_last=drop_last,
             num_workers=self.datarc["num_workers"],
-            collate_fn=dataset.collate_fn,
+            collate_fn=dataset.dataset.collate_fn,
         )
 
     def _get_balanced_dev_dataloader(self, dataset, drop_last=False):
@@ -78,7 +86,7 @@ class DownstreamExpert(nn.Module):
             collate_fn=dataset.collate_fn,
         )
 
-    def _get_dataloader(self, dataset):
+    def _get_dataloader(self, dataset, **kwargs):
         return DataLoader(
             dataset,
             shuffle=False,
@@ -89,11 +97,10 @@ class DownstreamExpert(nn.Module):
         )
 
     # Interface
-    def get_dataloader(self, mode):
+    def get_dataloader(self, mode, epoch=None, **kwargs):
         if mode == 'train':
-            return self._get_balanced_train_dataloader(self.train_dataset, drop_last=True)
-        elif mode == 'switch':
-            return self._get_balanced_train_dataloader(self.switch_train_dataset, drop_last=True)
+            return {'train': self._get_balanced_train_dataloader(self.train_dataset, drop_last=True),
+                    'switch': self._get_balanced_train_dataloader(self.switch_train_dataset, drop_last=True)}
         elif mode == 'dev':
             return self._get_balanced_dev_dataloader(self.dev_dataset, drop_last=False)
         elif mode == 'test':
@@ -125,6 +132,24 @@ class DownstreamExpert(nn.Module):
     # interface
     def log_records(self, mode, records, logger, global_step, **kwargs):
         save_names = []
+        wandb.define_metric("dev-acc", summary="max")
+        wandb.define_metric("dev-loss", summary="min")
+        wandb.define_metric("train-acc", summary="max")
+        wandb.define_metric("train-loss", summary="min")
+        results = {}
+        key_prefix = f"{mode}"
+        if 'layers' in kwargs:
+            for i, layer in enumerate(kwargs['layers']):
+                # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
+                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                    results.update({f"layer_{i}/{key_prefix}_{j}": logit.item()})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+        if 'norm_weights' in kwargs:
+            for i, weight in enumerate(kwargs['norm_weights']):
+                results.update({f"{key_prefix}_norm_weights_{i}": weight})
+        if 'lr' in kwargs:
+            results.update({"lr": kwargs["lr"]})
+
         for key in ["loss", "acc"]:
             values = records[key]
             average = sum(values) / len(values)
@@ -133,14 +158,17 @@ class DownstreamExpert(nn.Module):
                 average,
                 global_step=global_step
             )
+            results.update({f'{mode}-ks-{key}': average})
             with open(Path(self.expdir, "log.log"), 'a') as f:
                 if key == 'acc':
                     print(f"{mode} {key}: {average}")
                     f.write(f'{mode} at step {global_step}: {average}\n')
                     if mode == 'dev' and average > self.best_score:
-                        self.best_score = torch.ones(1) * average
+                        self.best_score = (torch.ones(1) * average).to(self.best_score.device)
                         f.write(f'New best on {mode} at step {global_step}: {average}\n')
                         save_names.append(f'{mode}-best.ckpt')
+
+        wandb.log(results, step=global_step)
 
         with open(Path(self.expdir) / f"{mode}_predict.txt", "w") as file:
             lines = [f"{f} {i}\n" for f, i in zip(records["filename"], records["predict"])]
@@ -166,7 +194,7 @@ def split_dataset(
         train_list: [(class_name, audio_path), ...]
         valid_list: as above
     """
-    train_list, valid_list = {"train": [], "eval": []}, []
+    train_list, valid_list = [], []
 
     for entry in Path(root_dir).iterdir():
         if not entry.is_dir() or entry.name == "_background_noise_":
@@ -183,9 +211,11 @@ def split_dataset(
                 valid_list.append((entry.name, audio_path))
             elif percentage_hash < 20:
                 pass  # testing set is discarded
-            elif percentage_hash < 80:
-                train_list['train'].append((entry.name, audio_path))
             else:
-                train_list['eval'].append((entry.name, audio_path))
+                train_list.append((entry.name, audio_path))
+            # elif percentage_hash < 20 + switch_ratio:
+            #     train_list['eval'].append((entry.name, audio_path))
+            # else:
+            #     train_list['train'].append((entry.name, audio_path))
 
     return train_list, valid_list

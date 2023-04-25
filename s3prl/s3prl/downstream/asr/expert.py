@@ -17,6 +17,7 @@ from ..model import *
 from .dataset import SequenceDataset
 from .dictionary import Dictionary
 
+import wandb
 
 def token_to_word(text):
     # Hard coding but it is only used here for now.
@@ -98,9 +99,14 @@ class DownstreamExpert(nn.Module):
         decoder_args = self.datarc.get('decoder_args')
         self.decoder = get_decoder(decoder_args, self.dictionary)
         self.register_buffer('best_score', torch.ones(1) * 100)
-
+        if 'adapterConfig' in kwargs:
+            self.adapterConfig = kwargs['adapterConfig']
+        else:
+            self.adapterConfig = None
+            print("[asr/expert.py] 105: No Adapter Config")
+            
     # Interface
-    def get_dataloader(self, split):
+    def get_dataloader(self, split, epoch=None):
         """
         Args:
             split: string
@@ -120,9 +126,11 @@ class DownstreamExpert(nn.Module):
         if not hasattr(self, f'{split}_dataset'):
             batch_size = self.datarc['batch_size'] if split == "train" else self.datarc['eval_batch_size']
             setattr(self, f'{split}_dataset', SequenceDataset(split, batch_size, self.dictionary, **self.datarc))
-
+        
         if split == 'train':
-            return self._get_train_dataloader(self.train_dataset)
+            switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1)
+            train_dataset, switch_dataset = torch.utils.data.random_split(self.train_dataset, [1 - switch_ratio, switch_ratio])
+            return {"train": self._get_train_dataloader(train_dataset), "switch": self._get_train_dataloader(switch_dataset)}
         else:
             return self._get_eval_dataloader(getattr(self, f'{split}_dataset'))
 
@@ -133,7 +141,7 @@ class DownstreamExpert(nn.Module):
             shuffle=(sampler is None),
             sampler=sampler,
             num_workers=self.datarc['num_workers'],
-            collate_fn=dataset.collate_fn,
+            collate_fn=self.train_dataset.collate_fn,
         )
 
     def _get_eval_dataloader(self, dataset):
@@ -330,9 +338,27 @@ class DownstreamExpert(nn.Module):
                 according to the evaluation result, like the best.ckpt on the dev set
                 You can return nothing or an empty list when no need to save the checkpoint
         """
+        wandb.define_metric("dev-uer", summary="min")
+        wandb.define_metric("dev-wer", summary="min")
+        wandb.define_metric("train-uer", summary="min")
+        wandb.define_metric("train-wer", summary="min")
+        results = {}
+        key_prefix = f"{split}"
         loss = torch.FloatTensor(records['loss']).mean().item()
         print(f'{split} loss: {loss}')
+        if 'layers' in kwargs:
+            for i, layer in enumerate(kwargs['layers']):
+                # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
+                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                    results.update({f"layer_{i}/{key_prefix}_{j}": logit.item()})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+        if 'norm_weights' in kwargs:
+            for i, weight in enumerate(kwargs['norm_weights']):
+                results.update({f"{key_prefix}_norm_weights_{i}": weight})
+        if 'lr' in kwargs:
+            results.update({"lr": kwargs["lr"]})
 
+        
         uer, wer = self._compute_metrics(
             records['pred_tokens'],
             records['pred_words'],
@@ -343,12 +369,15 @@ class DownstreamExpert(nn.Module):
         logger.add_scalar(f'asr/{split}-loss', loss, global_step=global_step)
         logger.add_scalar(f'asr/{split}-uer', uer, global_step=global_step)
         logger.add_scalar(f'asr/{split}-wer', wer, global_step=global_step)
+        results.update({f'{split}-asr-wer': wer})
+        results.update({f'{split}-asr-uer': uer})
+        results.update({f'{split}-asr-loss': loss})
         print(f'{split} uer: {uer}')
         print(f'{split} wer: {wer}')
-
+        wandb.log(results, step=global_step)
         save_names = []
         if split == 'dev-clean' and wer < self.best_score:
-            self.best_score = torch.ones(1) * wer
+            self.best_score = (torch.ones(1) * wer).to(self.best_score.device)
             save_names.append(f'{split}-best.ckpt')
 
         if 'test' in split or 'dev' in split:

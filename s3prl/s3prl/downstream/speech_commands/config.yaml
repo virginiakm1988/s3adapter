@@ -1,11 +1,11 @@
 runner:
-  total_steps: 200000
+  total_steps: 100000
   gradient_clipping: 1
   gradient_accumulate_steps: 1
 
-  log_step: 100
-  eval_step: 5000
-  save_step: 1000
+  log_step: 100 #100
+  eval_step: 5000 #5000
+  save_step: 5000 #1000
   max_keep: 1
   eval_dataloaders:
     - dev
@@ -18,9 +18,9 @@ optimizer:
 
 # comment the whole scheduler config block
 # to disable learning rate scheduling
-# scheduler:
-#   name: linear_schedule_with_warmup
-#   num_warmup_steps: 1400
+scheduler:
+  name: linear_schedule_with_warmup
+  num_warmup_steps: 1400
 
 downstream_expert:
   datarc:

@@ -117,6 +117,10 @@ class DownstreamExpert(nn.Module):
 
     # interface
     def log_records(self, split, records, logger, global_step, **kwargs):
+        wandb.define_metric("dev-per", summary="min")
+        wandb.define_metric("dev-loss", summary="min")
+        wandb.define_metric("train-per", summary="min")
+        wandb.define_metric("train-loss", summary="min")
         results = {}
         key_prefix = f"{split}"
         # if 'adapter_mode' in kwargs:
@@ -124,7 +128,7 @@ class DownstreamExpert(nn.Module):
         
         loss = torch.FloatTensor(records["loss"]).mean().item()
         results.update({f"{key_prefix}-loss": loss})
-
+        
         if 'layers' in kwargs:
             for i, layer in enumerate(kwargs['layers']):
                 # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})

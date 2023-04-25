@@ -7,9 +7,17 @@ python run_downstream.py --adapter=houlsby -u hubert -d asr -m evaluate -t test-
 ops: sequential, skip, parallel, ex: ops = 2 only considers first 2 paths.
 python run_downstream.py --adapter=houlsby -u hubert -d ctc -m train -f -n hubert_ctc -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml
 
+** create new container
+sudo apt update && sudo apt install tmux -y
+sudo ln -s /lib/x86_64-linux-gnu/libtic.so.6.2 /lib/x86_64-linux-gnu/libtinfow.so.6
+tmux
+conda activate s3adapter
+
+
 ** Stage 1 & Stage 2 **
 ngpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
-python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d ctc -m train -f -n {exp dir name} -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml --ngpu ${ngpus} --stage2_weighted_sum
+
+python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d ctc -m train -f -n {exp dir name} -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml --ngpu ${ngpus} --online -o "config.runner.gradient_accumulate_steps={original steps / 2}" --stage1_ratio=0.5
 
 ** Testing **
 python3 run_downstream.py -m evaluate -t {testing split} -i {ckpt} -c downstream/ctc/libriphone.yaml --adapter=houlsby -u hubert -d ctc -uac upstream/adapterConfig.yaml -n {exp name}
@@ -21,4 +29,4 @@ Note:
 * If using only SINGLE GPU, remember to delete the .module in self.upstream.model.module.model.... #(還是我們用一張的時候也開DDP啊數碼寶貝...)
 
 Override:
---overide config.runner.gradient_accumulate_steps=2,,config.xx.yy=zz
+--overide "config.runner.gradient_accumulate_steps=2,,config.adapter_config.switch.baseline=2"

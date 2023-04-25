@@ -107,11 +107,15 @@ class Runner():
         self.stage2_ckpt = torch.load(self.args.stage2_ckpt, map_location='cpu') if self.args.stage2_ckpt else {}
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
 
+        '''
         if isinstance(args.upstream_adapter_config, str):   # In evaluate mode (i.e. run with -e evaluate), this parameter will be dict.
             with open(args.upstream_adapter_config, 'r') as file:
                 self.adapterDict = yaml.load(file, Loader=yaml.FullLoader)
         else:
             self.adapterDict = args.upstream_adapter_config
+        '''
+        
+        self.adapterDict = {'adapter': config['adapter_config']}
         self.adapter_config = dict2obj(self.adapterDict)
         if self.args.mode == 'train':
             # train both stage1 and stage2
@@ -124,7 +128,7 @@ class Runner():
             self.stage1_steps = 0
             self.stage2_steps = self.config['runner']['total_steps']
         else:
-            self.stage1_steps = self.stage2_steps = 0
+            self.stage1_steps = self.stage2_steps = 1
 
 
         if is_leader_process():
@@ -139,6 +143,9 @@ class Runner():
         self.config['runner']['total_steps'] = self.stage1_steps + self.stage2_steps
 
         self.adapter_config.adapter.switch.tau.steps = self.stage1_steps
+        if self.init_ckpt.get('Step', 0):
+            init_step = self.init_ckpt['Step']
+            self.init_ckpt['Step'] = init_step // 2 if init_step <= self.stage1_steps * 2 else init_step - self.stage1_steps
         self.adapter_config.adapter.switch.tau.init_steps = self.init_ckpt.get('Step', 0)
         self.adapter_config.adapter.switch.stage = 1 + (self.adapter_config.adapter.switch.tau.init_steps >= self.stage1_steps)
         self.stage = self.adapter_config.adapter.switch.stage
@@ -150,7 +157,16 @@ class Runner():
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
         self.all_entries = [self.upstream, self.featurizer, self.downstream]
-
+        if is_leader_process():
+            wandb.init(
+                project=f'{self.args.upstream}-{self.args.downstream}', 
+                mode="online" if self.args.online else "disabled", 
+                name=f'{int(self.args.stage1_ratio * 100)}% search, lr {self.config["optimizer"]["lr"]}'
+            )
+            newArg = self.args
+            newArg.config = self.config
+            newArg.upstream_adapter_config = self.adapterDict
+            wandb.config.update(newArg)
 
     def _load_weight(self, model, name):
         init_weight = self.init_ckpt.get(name) if not 'optimizer' in name else self.init_ckpt.get('Optimizer')
@@ -343,16 +359,8 @@ class Runner():
             self.featurizer.model.train()
     @ddprecod
     def train(self):
-        if is_leader_process():
-            wandb.init(project=f'{self.args.upstream}-{self.args.downstream}', mode="online" if self.args.online else "disabled")
-            newArg = self.args
-            newArg.config = self.config
-            newArg.upstream_adapter_config = self.adapterDict
-            wandb.config.update(newArg)
-            wandb.define_metric("dev-per", summary="min")
-            wandb.define_metric("dev-loss", summary="min")
-            wandb.define_metric("train-per", summary="min")
-            wandb.define_metric("train-loss", summary="min")
+        
+            
         # trainable parameters and train/eval mode
         trainable_paras = []
         # Network weights
@@ -421,6 +429,7 @@ class Runner():
             logger = SummaryWriter(self.args.expdir)
 
         backward_steps = 0
+        delta_step = 0
         batch_ids = []
         records = defaultdict(list)
         epoch = self.init_ckpt.get('Epoch', 0)        
@@ -441,7 +450,8 @@ class Runner():
             for i, weight in enumerate(self.featurizer.model.module.norm_weights):
                 results.update({f"{train_split}_norm_weights_{i}": weight})
 
-            results.update({"lr": scheduler.get_last_lr()[0]})
+            if scheduler:
+                results.update({"lr": scheduler.get_last_lr()[0]})
             wandb.log(results, step=pbar.n)
 
             del results
@@ -461,18 +471,21 @@ class Runner():
             else:
                 raise
         
+        indices = {}
         for adapterMode in adapterModes:
-            linelogger.info(f'dataset size of {adapterMode}: {len(dataloaders[adapterMode].dataset)}')
-        for adapterMode in adapterModes:
-            linelogger.info(f'data loader size of {adapterMode}: {len(dataloaders[adapterMode])}')
-            linelogger.info(f'dataset # indice of {adapterMode}: {len(dataloaders[adapterMode].dataset.indices)}')
-        linelogger.info(f'dataset overlap: {len(set(dataloaders["train"].dataset.indices) & set(dataloaders["switch"].dataset.indices))}')
+            if dataloaders[adapterMode]:
+                linelogger.info(f'dataset size of {adapterMode}: {len(dataloaders[adapterMode].dataset)}')
+                linelogger.info(f'data loader size of {adapterMode}: {len(dataloaders[adapterMode])}')
+                linelogger.info(f'dataset # indice of {adapterMode}: {len(dataloaders[adapterMode].dataset.indices)}')
+        if dataloaders['switch']:
+            linelogger.info(f'dataset overlap: {len(set(dataloaders["train"].dataset.indices) & set(dataloaders["switch"].dataset.indices))}')
 
         input_modes, cur_step, iters = {}, {}, {}
         for adapterMode in adapterModes:
-            input_modes[adapterMode] = None
-            cur_step[adapterMode] = 0
-            iters[adapterMode] = iter(dataloaders[adapterMode])
+            if dataloaders[adapterMode]:
+                input_modes[adapterMode] = None
+                cur_step[adapterMode] = 0
+                iters[adapterMode] = iter(dataloaders[adapterMode])
             
         self.stage_steps_prefix = [self.stage1_steps, self.config['runner']['total_steps']]
 
@@ -480,6 +493,7 @@ class Runner():
             if self.stage == 1 and pbar.n >= self.stage_steps_prefix[self.stage - 1]:
                 self.prepare_stage(2)
                 self.stage = 2
+                delta_step = self.stage1_steps * 2 - pbar.n 
                 try:
                     dataloaders = self.downstream.model.get_dataloader(train_split, epoch=epoch)
                 except TypeError as e:
@@ -517,7 +531,7 @@ class Runner():
                     optimizer, lr_scheduler, trainable_paras = \
                         (w_optimizer, scheduler, trainable_w_paras) if adapterMode == 'train' else (a_optimizer, None, trainable_a_paras)
                     assert(not (adapterMode != 'train' and self.stage == 2))
-
+                    
                     for entry in self.all_entries:
                         if self.args.adapter != False and entry.name == "Upstream":
                             for name, param in entry.model.named_parameters():
@@ -534,7 +548,7 @@ class Runner():
                                 param.requires_grad = (self.stage == 1 and self.args.stage1_weighted_sum) \
                                                         or (self.stage == 2 and self.args.stage2_weighted_sum)
                     try:     
-                        global_step = pbar.n + 1                   
+                        global_step = pbar.n * (1 + (self.stage == 1)) + (1 + (adapterMode == 'switch')) + delta_step * (self.stage == 2)                  
                         wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in input_modes[adapterMode]['wavs']]
                         # linelogger.info(f"!!!!!{adapterMode} = = {self.stage}, {(wavs[0]).shape}, {wavs[0].device}, {'parent' if is_leader_process() else 'child'}")                        
                         if self.upstream.trainable:
@@ -572,7 +586,8 @@ class Runner():
                     if adapterMode == 'train':
                         # Only increment backward_steps in one of the adapterModes
                         backward_steps += 1
-                    linelogger.info(f'backward steps = {backward_steps}, global_step = {global_step}, process = {"parent" if is_leader_process() else "child"}')
+                    
+                    # linelogger.info(f"{backward_steps}, {gradient_accumulate_steps}")
                     if backward_steps % gradient_accumulate_steps > 0:
                         continue
 
@@ -586,10 +601,12 @@ class Runner():
                     else:
                         optimizer.step()
                     optimizer.zero_grad()
-
+                    
                     # adjust learning rate
                     if lr_scheduler:
+                        # linelogger.info(lr_scheduler.get_last_lr()[0])
                         lr_scheduler.step()
+                        
                 
                 if backward_steps % gradient_accumulate_steps > 0:
                     continue
@@ -605,6 +622,7 @@ class Runner():
                     continue
 
                 # logging
+                
                 if global_step % self.config['runner']['log_step'] == 0:
                     self.downstream.model.log_records(
                         train_split,
@@ -616,7 +634,7 @@ class Runner():
                         adapter_mode = adapterMode,
                         layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
                         norm_weights = self.featurizer.model.module.norm_weights.detach(),
-                        lr = scheduler.get_last_lr()[0],
+                        lr = scheduler.get_last_lr()[0] if scheduler else 0,
                         to_wandb = True
                     )
                     batch_ids = []

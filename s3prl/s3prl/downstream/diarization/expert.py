@@ -95,7 +95,7 @@ class DownstreamExpert(nn.Module):
         self.register_buffer("best_score", torch.zeros(1))
 
     # Interface
-    def get_dataloader(self, mode):
+    def get_dataloader(self, mode, switch_ratio=0.3):
         """
         Args:
             mode: string
@@ -115,6 +115,13 @@ class DownstreamExpert(nn.Module):
                 self.loaderrc[f"{mode}_dir"],
                 **self.datarc,
             )
+            # split the training set into two parts
+            if mode == "train":
+                train_dataset, switch_dataset = torch.utils.data.random_split(dataset, [1 - switch_ratio, switch_ratio])
+                dataset = {
+                    "train": train_dataset,
+                    "switch": switch_dataset
+                }
             setattr(self, f"{mode}_dataset", dataset)
 
         if mode == "train":
@@ -135,17 +142,34 @@ class DownstreamExpert(nn.Module):
     """
 
     def _get_train_dataloader(self, dataset):
-        sampler = DistributedSampler(dataset) if is_initialized() else None
-        return DataLoader(
+        train_sampler = DistributedSampler(dataset["train"]) if is_initialized() else None
+        switch_sampler = DistributedSampler(dataset["train"]) if is_initialized() else None
+        
+        train_dataloader = DataLoader(
             dataset,
             batch_size=self.train_batch_size,
-            shuffle=(sampler is None),
-            sampler=sampler,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
             num_workers=self.loaderrc["num_workers"],
             drop_last=False,
             pin_memory=True,
             collate_fn=dataset.collate_fn,
         )
+        switch_dataloader = DataLoader(
+            dataset,
+            batch_size=self.train_batch_size,
+            shuffle=(switch_sampler is None),
+            sampler=switch_sampler,
+            num_workers=self.loaderrc["num_workers"],
+            drop_last=False,
+            pin_memory=True,
+            collate_fn=dataset.collate_fn,
+        )
+        
+        return {
+            "train": train_dataloader,
+            "switch": switch_dataloader
+        }
 
     def _get_dev_dataloader(self, dataset):
         return DataLoader(
@@ -331,6 +355,8 @@ class DownstreamExpert(nn.Module):
                 You can return nothing or an empty list when no need to save the checkpoint
 
         """
+        results = {} # results update to wandb
+
         average_acc = torch.FloatTensor(records["acc"]).mean().item()
         average_der = torch.FloatTensor(records["der"]).mean().item()
 
@@ -341,6 +367,24 @@ class DownstreamExpert(nn.Module):
             f"diarization/{mode}-der", average_der, global_step=global_step
         )
         print("mode {} acc {} der {}".format(mode, average_acc, average_der))
+
+        results.update({f'{mode}-acc': average_acc})
+        results.update({f'{mode}-der': average_der})
+
+        if 'layers' in kwargs:
+            for i, layer in enumerate(kwargs['layers']):
+                # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
+                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                    results.update({f"layer_{i}/{mode}_{j}": logit.item()})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+        if 'norm_weights' in kwargs:
+            for i, weight in enumerate(kwargs['norm_weights']):
+                results.update({f"{mode}_norm_weights_{i}": weight})
+        if 'lr' in kwargs:
+            results.update({"lr": kwargs["lr"]})
+
+        if "to_wandb" in kwargs and kwargs['to_wandb']:
+            wandb.log(results, step=global_step)
 
         save_ckpt = []
         if mode == "dev" and average_acc > self.best_score:

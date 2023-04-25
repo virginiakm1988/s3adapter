@@ -16,25 +16,25 @@ optimizer:
 
 # comment the whole scheduler config block
 # to disable learning rate scheduling
-# scheduler:
-#   name: linear_schedule_with_warmup
-#   num_warmup_steps: 1400
+scheduler:
+  name: linear_schedule_with_warmup
+  num_warmup_steps: 1400
 # comment the whole specaug config block
 # to disable specaug on representation
 
-specaug:
-  adaptive: false
-  adaptive_number_ratio: 0.04
-  adaptive_size_ratio: 0.04
-  max_n_time_masks: 20
-  apply_time_warp: true
-  apply_time_mask: true
-  apply_freq_mask: true
-  time_warp_window: 5
-  time_mask_width_range: [0, 40]
-  freq_mask_width_range: [0, 50]
-  num_freq_mask: 4
-  num_time_mask: 2
+# specaug:
+#   adaptive: false
+#   adaptive_number_ratio: 0.04
+#   adaptive_size_ratio: 0.04
+#   max_n_time_masks: 20
+#   apply_time_warp: true
+#   apply_time_mask: true
+#   apply_freq_mask: true
+#   time_warp_window: 5
+#   time_mask_width_range: [0, 40]
+#   freq_mask_width_range: [0, 50]
+#   num_freq_mask: 4
+#   num_time_mask: 2
 
 downstream_expert:
   datarc:
@@ -47,8 +47,8 @@ downstream_expert:
     train_batch_size: 16
     batch_size: 16
     eval_batch_size: 1
-    libri_root: '/data1/b08902047/librispeech_raw/LibriSpeech'
-    bucket_file: './data/len_for_bucket'
+    libri_root: '/work/u2752721/LibriSpeech'
+    bucket_file: './downstream/asr/data/len_for_bucket'
     dict_path: "./downstream/asr/char.dict"
 
     zero_infinity: True

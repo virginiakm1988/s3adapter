@@ -98,7 +98,7 @@ def override(string, args, config):
                 else:
                     target_config.setdefault(field_name, {})
                     target_config = target_config[field_name]
-
+        
 def zero_mean_unit_var_norm(input_values: List[np.ndarray]) -> List[np.ndarray]:
     """
     Every array in the list is normalized to have zero mean and unit variance

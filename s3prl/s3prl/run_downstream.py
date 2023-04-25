@@ -174,13 +174,14 @@ def get_downstream_args():
             args.config = f'./downstream/{args.downstream}/config.yaml'
         with open(args.config, 'r') as file:
             config = yaml.load(file, Loader=yaml.FullLoader)
-
+        with open(args.upstream_adapter_config, 'r') as file:
+            adapter_config = yaml.load(file, Loader=yaml.FullLoader)
         if args.upstream_model_config is not None and os.path.isfile(args.upstream_model_config):
             backup_files.append(args.upstream_model_config)
             
         if args.upstream_adapter_config is not None and os.path.isfile(args.upstream_adapter_config):
             backup_files.append(args.upstream_adapter_config)
-
+        config['adapter_config'] = adapter_config['adapter']
     if args.override is not None and args.override.lower() != "none":
         override(args.override, args, config)
         os.makedirs(args.expdir, exist_ok=True)

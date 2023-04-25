@@ -48,6 +48,7 @@ class SequenceDataset(Dataset):
 
         # Wavs
         table_list = []
+        print(self.split_sets)
         for item in self.split_sets:
             file_path = os.path.join(bucket_file, item + ".csv")
             if os.path.exists(file_path):

@@ -485,7 +485,8 @@ class AdapterSwitch(nn.Module):
 
         # Keep the logits of probabilities as a separate parameters.
 
-        self.tau_step =  (self.config.tau.type == 'linear') * (self.config.tau.init_value - self.config.tau.stop_value) / self.config.tau.steps
+        self.tau_step = 0 if self.config.baseline >= 0 \
+                        else (self.config.tau.type == 'linear') * (self.config.tau.init_value - self.config.tau.stop_value) / self.config.tau.steps
         self.switch_temperature = ([self.config.tau.init_value - self.tau_step * self.config.tau.init_steps])
         self.hard = self.config.hard
         # Distribution used.
@@ -495,8 +496,9 @@ class AdapterSwitch(nn.Module):
         self.layer_idx = layer_idx
         initial_logits = ([1. / len(self.paths)] * len(self.paths) if self.config.baseline < 0 
                             else [int(i == self.config.baseline) for i in range(len(self.paths))])
+        print(initial_logits)
         self.register_parameter(
-                    'switch_logits', nn.Parameter(torch.tensor(initial_logits))
+                    'switch_logits', nn.Parameter(torch.FloatTensor(initial_logits))
                 )
         # self.soft_logits = self.probs()
         logger.info(f"paths = {len(initial_logits)}")

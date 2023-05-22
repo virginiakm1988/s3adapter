@@ -22,6 +22,8 @@ python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --a
 SD:
 python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d diarization -m train -f -n hubert_sd_25_flr_tau -uac upstream/adapterConfig.yaml -c downstream/diarization/config.yaml --ngpu ${ngpus} --online -o "config.runner.gradient_accumulate_steps=2,,config.adapter_config.switch.tau.init_value=10,,config.adapter_config.switch.tau.stop_value=0.1" --stage1_ratio=0.25 --f_lr
 
+If you want to tune featurizer with switch logits, specify **--f_lr_stage=1** when running the code.
+
 ** Testing **
 python3 run_downstream.py -m evaluate -t {testing split} -i {ckpt} -c downstream/ctc/libriphone.yaml --adapter=houlsby -u hubert -d ctc -uac upstream/adapterConfig.yaml -n {exp name}
 

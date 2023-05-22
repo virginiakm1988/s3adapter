@@ -353,8 +353,12 @@ class Runner():
         self.upstream.model.module.model.set_stage(stage)
             
         if stage == 1:
-            if not self.args.stage1_weighted_sum:
+            # if not self.args.stage1_weighted_sum:
+            if not self.args.f_lr or self.args.f_lr_stage == 2:
                 self.featurizer.model.eval()
+            else:
+                linelogger.info(f'train f_lr at stage 1')
+                self.featurizer.model.train()
         elif stage == 2:
             self.downstream.model.module.adapterConfig.adapter.switch.ratio = 0
             self.featurizer.model.train()
@@ -411,6 +415,7 @@ class Runner():
         # optimizer
         w_optimizer = self._get_optimizer(trainable_w_paras, 'w_optimizer', [])
         a_optimizer = self._get_optimizer(trainable_a_paras, 'a_optimizer', [])
+        f_optimizer = None
         if len(trainable_f_paras):
             f_optimizer = self._get_optimizer(trainable_f_paras, 'f_optimizer', [])
         
@@ -420,7 +425,11 @@ class Runner():
         if self.config.get('scheduler'):
             scheduler = self._get_scheduler(w_optimizer)
             if len(trainable_f_paras):
-                f_scheduler = self._get_scheduler(f_optimizer, self.stage2_steps, scheduler_name='f_scheduler')
+                f_scheduler = self._get_scheduler(
+                    f_optimizer, 
+                    self.stage2_steps if self.args.f_lr_stage == 2 else self.config['runner']['total_steps'], 
+                    scheduler_name='f_scheduler'
+                )
 
         # specaug
         specaug = None
@@ -558,7 +567,8 @@ class Runner():
                         if entry.name == "Featurizer":
                             for name, param in entry.model.named_parameters():
                                 param.requires_grad = (self.stage == 1 and self.args.stage1_weighted_sum) \
-                                                        or (self.stage == 2 and self.args.stage2_weighted_sum)
+                                                        or (self.stage == 2 and self.args.stage2_weighted_sum) \
+                                                            or (self.args.f_lr and self.stage >= self.args.f_lr_stage)
                     try:     
                         global_step = pbar.n * (1 + (self.stage == 1)) + (1 + (adapterMode == 'switch')) + delta_step * (self.stage == 2)                  
                         wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in input_modes[adapterMode]['wavs']]
@@ -612,7 +622,8 @@ class Runner():
                         print(f'[Runner] - grad norm is NaN at step {global_step}, mode {adapterMode}')
                     else:
                         optimizer.step()
-                        if self.stage == 2 and len(trainable_f_paras):
+                        if f_optimizer and (self.stage == 2 or (self.args.f_lr_stage == 1 and adapterMode == 'switch')):
+                            # only use f_optimizer if 11) it is not none and (2) at stage 2 or (training switch at stage 1) 
                             f_optimizer.step()
                             f_optimizer.zero_grad()
                     optimizer.zero_grad()
@@ -622,7 +633,7 @@ class Runner():
                         # linelogger.info(lr_scheduler.get_last_lr()[0])
                         lr_scheduler.step()
 
-                    if self.stage == 2 and f_scheduler:
+                    if f_scheduler and (self.stage == 2 or (self.args.f_lr_stage == 1 and adapterMode == 'switch')):
                         f_scheduler.step()
                         
                 
@@ -652,7 +663,7 @@ class Runner():
                         layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
                         norm_weights = self.featurizer.model.module.norm_weights.detach(),
                         lr = scheduler.get_last_lr()[0] if scheduler else 0,
-                        f_lr = f_scheduler.get_last_lr()[0] if (self.stage == 2 and f_scheduler) else 0,
+                        f_lr = f_scheduler.get_last_lr()[0] if (f_scheduler and self.stage >= self.args.f_lr_stage) else 0,
                         to_wandb = True
                     )
                     batch_ids = []

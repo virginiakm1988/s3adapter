@@ -15,6 +15,12 @@ optimizer:
   torch_optim_name: Adam
   lr: 1.0e-4
 
+# comment the whole scheduler config block
+# to disable learning rate scheduling
+scheduler:
+  name: linear_schedule_with_warmup
+  num_warmup_steps: 1400
+
 downstream_expert:
   datarc:
     chunk_size: 2000

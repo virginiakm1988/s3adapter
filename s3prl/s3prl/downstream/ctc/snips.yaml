@@ -17,9 +17,9 @@ optimizer:
 
 # comment the whole scheduler config block
 # to disable learning rate scheduling
-# scheduler:
-#   name: linear_schedule_with_warmup
-#   num_warmup_steps: 1400
+scheduler:
+  name: linear_schedule_with_warmup
+  num_warmup_steps: 1400
 
 specaug:
   adaptive: false
@@ -38,7 +38,7 @@ specaug:
 downstream_expert:
   corpus:                                 
     name: 'snips'                   # Specify corpus
-    path: '/path/to/SNIPS'          # Path to raw LibriSpeech dataset
+    path: '/work/u2752721/SNIPS'          # Path to raw LibriSpeech dataset
 
     train: ['train']                # Name of data splits to be used as training set
     dev: ['valid']                    # Name of data splits to be used as validation set
@@ -102,7 +102,7 @@ downstream_expert:
   text:
     mode: 'character-slot'                       # 'character'/'word'/'subword'
     vocab_file: 'downstream/ctc/vocab/character.txt'
-    slots_file: '/path/to/SNIPS/slots.txt'
+    slots_file: '/work/u2752721/SNIPS/slots.txt'
   
   model:
     project_dim: 1024

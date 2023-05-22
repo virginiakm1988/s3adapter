@@ -18,9 +18,9 @@ optimizer:
 
 # comment the whole scheduler config block
 # to disable learning rate scheduling
-# scheduler:
-#   name: linear_schedule_with_warmup
-#   num_warmup_steps: 1000
+scheduler:
+  name: linear_schedule_with_warmup
+  num_warmup_steps: 1000
 
 downstream_expert:
   datarc:
@@ -28,7 +28,7 @@ downstream_expert:
     num_workers: 12
     train_batch_size: 32
     eval_batch_size: 32
-    switch_ratio: 0.1
+    switch_ratio: 0.5
 
   modelrc:
     projector_dim: 256

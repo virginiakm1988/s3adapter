@@ -425,6 +425,16 @@ def dict2obj(dict1):
     # method and custom object hook as arguments
     return json.loads(json.dumps(dict1), object_hook=obj)
 
+def is_baseline(baseline):
+    if(type(baseline) == list):
+        assert(len(baseline) == 12)
+        return baseline
+    else:
+        if baseline < 0:
+            return 0
+        return [baseline] * 12
+    
+
 class MyLogger:
     def __init__(self, logger) -> None:
         
@@ -484,9 +494,8 @@ class AdapterSwitch(nn.Module):
         self.config = config
 
         # Keep the logits of probabilities as a separate parameters.
-
-        self.tau_step = 0 if self.config.baseline >= 0 \
-                        else (self.config.tau.type == 'linear') * (self.config.tau.init_value - self.config.tau.stop_value) / self.config.tau.steps
+        
+        self.tau_setup()
         self.switch_temperature = ([self.config.tau.init_value - self.tau_step * self.config.tau.init_steps])
         self.hard = self.config.hard
         # Distribution used.
@@ -494,8 +503,8 @@ class AdapterSwitch(nn.Module):
         self.training = True
         self.paths = self.config.path
         self.layer_idx = layer_idx
-        initial_logits = ([1. / len(self.paths)] * len(self.paths) if self.config.baseline < 0 
-                            else [int(i == self.config.baseline) for i in range(len(self.paths))])
+        initial_logits = ([1. / len(self.paths)] * len(self.paths) if not (self.config.baseline) 
+                            else [int(i == self.config.baseline[layer_idx]) for i in range(len(self.paths))])
         print(initial_logits)
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.FloatTensor(initial_logits))
@@ -586,9 +595,35 @@ class AdapterSwitch(nn.Module):
         return y.transpose(0, 1)
     def reduce_tau(self):
         # tau_before = self.switch_temperature[0]
-        self.switch_temperature[0] = max(self.config.tau.stop_value, self.switch_temperature[0] - self.tau_step)
+        if self.config.tau.type == 'linear':
+            self.switch_temperature[0] = max(self.config.tau.stop_value, self.switch_temperature[0] - self.tau_step)
+        elif self.config.tau.type == 'exp':
+            self.switch_temperature[0] = max(self.config.tau.stop_value, self.switch_temperature[0] * self.tau_step)
         # logger.info(f"tau reduce from {tau_before} to {self.switch_temperature[0]}")
 
+    def tau_setup(self):
+        if self.config.tau.type == 'const':
+            self.tau_step = 0
+            return
+        
+        if self.config.tau.type == 'linear':
+            if self.config.baseline:
+                self.tau_step = 0.0
+            else:
+                self.tau_step = (not self.config.baseline) * (self.config.tau.init_value - self.config.tau.stop_value) / self.config.tau.steps
+            return
+        
+        if self.config.tau.type == 'exp':
+            # init_value * (tau_step) ^ steps = stop_value -> tau_step = (stop_value / init_value) ^ (1 / steps)
+            if (self.config.baseline):
+                self.tau_step = 1.0
+            else:
+                self.tau_step = (self.config.tau.stop_value / self.config.tau.init_value) ** (1 / self.config.tau.steps)
+            return
+        '''
+        self.tau_step = 0 if (self.config.baseline) \
+                        else (self.config.tau.type == 'linear') * (self.config.tau.init_value - self.config.tau.stop_value) / self.config.tau.steps
+        '''
 class Adapter(nn.Module):
     def __init__(self) -> None:
         super().__init__()

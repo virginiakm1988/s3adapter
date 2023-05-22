@@ -14,7 +14,7 @@ from ..model import *
 from .model import *
 from .dataset import IEMOCAPDataset, collate_fn
 
-
+import wandb
 class DownstreamExpert(nn.Module):
     """
     Used to handle downstream-specific operations
@@ -64,7 +64,11 @@ class DownstreamExpert(nn.Module):
         self.objective = nn.CrossEntropyLoss()
         self.expdir = expdir
         self.register_buffer('best_score', torch.zeros(1))
-
+        if 'adapterConfig' in kwargs:
+            self.adapterConfig = kwargs['adapterConfig']
+        else:
+            self.adapterConfig = None
+            print("[asr/expert.py] 105: No Adapter Config")
 
     def get_downstream_name(self):
         return self.fold.replace('fold', 'emotion')
@@ -96,7 +100,11 @@ class DownstreamExpert(nn.Module):
         return self._get_eval_dataloader(self.test_dataset)
 
     # Interface
-    def get_dataloader(self, mode):
+    def get_dataloader(self, mode, epoch=None):
+        if mode == 'train':
+            switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1)
+            train_dataset, switch_dataset = torch.utils.data.random_split(self.train_dataset, [1 - switch_ratio, switch_ratio])
+            return {"train": self._get_train_dataloader(train_dataset), "switch": self._get_train_dataloader(switch_dataset)}
         return eval(f'self.get_{mode}_dataloader')()
 
     # Interface
@@ -123,6 +131,24 @@ class DownstreamExpert(nn.Module):
 
     # interface
     def log_records(self, mode, records, logger, global_step, **kwargs):
+        wandb.define_metric("dev-acc", summary="max")
+        wandb.define_metric("train-acc", summary="max")
+        results = {}
+        key_prefix = f"{mode}"
+        if 'layers' in kwargs:
+            for i, layer in enumerate(kwargs['layers']):
+                # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
+                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                    results.update({f"layer_{i}/{key_prefix}_{j}": logit.item()})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+        if 'norm_weights' in kwargs:
+            for i, weight in enumerate(kwargs['norm_weights']):
+                results.update({f"{key_prefix}_norm_weights_{i}": weight})
+        if 'lr' in kwargs:
+            results.update({"lr": kwargs["lr"]})
+        if 'f_lr' in kwargs:
+            results.update({"f_lr": kwargs['f_lr']})
+            
         save_names = []
         for key in ["acc", "loss"]:
             values = records[key]
@@ -132,12 +158,13 @@ class DownstreamExpert(nn.Module):
                 average,
                 global_step=global_step
             )
+            results.update({f'{mode}-{key}': average})
             with open(Path(self.expdir) / "log.log", 'a') as f:
                 if key == 'acc':
                     print(f"{mode} {key}: {average}")
                     f.write(f'{mode} at step {global_step}: {average}\n')
                     if mode == 'dev' and average > self.best_score:
-                        self.best_score = torch.ones(1) * average
+                        self.best_score = (torch.ones(1) * average).to(self.best_score.device)
                         f.write(f'New best on {mode} at step {global_step}: {average}\n')
                         save_names.append(f'{mode}-best.ckpt')
 
@@ -149,5 +176,5 @@ class DownstreamExpert(nn.Module):
             with open(Path(self.expdir) / f"{mode}_{self.fold}_truth.txt", "w") as file:
                 line = [f"{f} {e}\n" for f, e in zip(records["filename"], records["truth"])]
                 file.writelines(line)
-
+        wandb.log(results, step=global_step)
         return save_names

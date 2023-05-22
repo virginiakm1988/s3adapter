@@ -338,10 +338,10 @@ class DownstreamExpert(nn.Module):
                 according to the evaluation result, like the best.ckpt on the dev set
                 You can return nothing or an empty list when no need to save the checkpoint
         """
-        wandb.define_metric("dev-uer", summary="min")
-        wandb.define_metric("dev-wer", summary="min")
-        wandb.define_metric("train-uer", summary="min")
-        wandb.define_metric("train-wer", summary="min")
+        wandb.define_metric("dev-clean-asr-uer", summary="min")
+        wandb.define_metric("dev-clean-asr-wer", summary="min")
+        wandb.define_metric("train-asr-uer", summary="min")
+        wandb.define_metric("train-asr-wer", summary="min")
         results = {}
         key_prefix = f"{split}"
         loss = torch.FloatTensor(records['loss']).mean().item()
@@ -357,7 +357,8 @@ class DownstreamExpert(nn.Module):
                 results.update({f"{key_prefix}_norm_weights_{i}": weight})
         if 'lr' in kwargs:
             results.update({"lr": kwargs["lr"]})
-
+        if 'f_lr' in kwargs:
+            results.update({"f_lr": kwargs['f_lr']})
         
         uer, wer = self._compute_metrics(
             records['pred_tokens'],

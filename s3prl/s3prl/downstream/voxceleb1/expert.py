@@ -173,6 +173,9 @@ class DownstreamExpert(nn.Module):
         if 'lr' in kwargs:
             results.update({"lr": kwargs["lr"]})
 
+        if 'f_lr' in kwargs:
+            results.update({"f_lr": kwargs["f_lr"]})
+
         if "to_wandb" in kwargs and kwargs['to_wandb']:
             wandb.log(results, step=global_step)
 

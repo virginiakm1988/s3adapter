@@ -16,6 +16,7 @@ import h5py
 import random
 import logging
 import numpy as np
+import wandb
 from pathlib import Path
 from collections import defaultdict
 
@@ -43,6 +44,11 @@ class DownstreamExpert(nn.Module):
         self.upstream_dim = upstream_dim
         self.upstream_rate = upstream_rate
         self.datarc = downstream_expert["datarc"]
+        if 'adapterConfig' in kwargs:
+            self.adapterConfig = kwargs['adapterConfig']
+        else:
+            self.adapterConfig = None
+            print("[diarization/expert.py] 105: No Adapter Config")
 
         config_frame_shift = self.datarc.get("frame_shift")
         if isinstance(config_frame_shift, int):
@@ -95,7 +101,7 @@ class DownstreamExpert(nn.Module):
         self.register_buffer("best_score", torch.zeros(1))
 
     # Interface
-    def get_dataloader(self, mode, switch_ratio=0.3):
+    def get_dataloader(self, mode, switch_ratio=0.5):
         """
         Args:
             mode: string
@@ -119,6 +125,7 @@ class DownstreamExpert(nn.Module):
             if mode == "train":
                 train_dataset, switch_dataset = torch.utils.data.random_split(dataset, [1 - switch_ratio, switch_ratio])
                 dataset = {
+                    "original": dataset,
                     "train": train_dataset,
                     "switch": switch_dataset
                 }
@@ -143,27 +150,27 @@ class DownstreamExpert(nn.Module):
 
     def _get_train_dataloader(self, dataset):
         train_sampler = DistributedSampler(dataset["train"]) if is_initialized() else None
-        switch_sampler = DistributedSampler(dataset["train"]) if is_initialized() else None
+        switch_sampler = DistributedSampler(dataset["switch"]) if is_initialized() else None
         
         train_dataloader = DataLoader(
-            dataset,
+            dataset["train"],
             batch_size=self.train_batch_size,
             shuffle=(train_sampler is None),
             sampler=train_sampler,
             num_workers=self.loaderrc["num_workers"],
             drop_last=False,
             pin_memory=True,
-            collate_fn=dataset.collate_fn,
+            collate_fn=dataset["original"].collate_fn,
         )
         switch_dataloader = DataLoader(
-            dataset,
+            dataset["switch"],
             batch_size=self.train_batch_size,
             shuffle=(switch_sampler is None),
             sampler=switch_sampler,
             num_workers=self.loaderrc["num_workers"],
             drop_last=False,
             pin_memory=True,
-            collate_fn=dataset.collate_fn,
+            collate_fn=dataset["original"].collate_fn,
         )
         
         return {
@@ -355,6 +362,11 @@ class DownstreamExpert(nn.Module):
                 You can return nothing or an empty list when no need to save the checkpoint
 
         """
+        wandb.define_metric("train-der", summary="min")
+        wandb.define_metric("train-loss", summary="min")
+        wandb.define_metric("dev-der", summary="min")
+        wandb.define_metric("dev-loss", summary="min")
+
         results = {} # results update to wandb
 
         average_acc = torch.FloatTensor(records["acc"]).mean().item()
@@ -388,7 +400,7 @@ class DownstreamExpert(nn.Module):
 
         save_ckpt = []
         if mode == "dev" and average_acc > self.best_score:
-            self.best_score = torch.ones(1) * average_acc
+            self.best_score = (torch.ones(1) * average_acc).to(self.best_score.device)
             save_ckpt.append(f"best-states-{mode}.ckpt")
 
         return save_ckpt

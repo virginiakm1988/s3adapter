@@ -15,6 +15,7 @@ from torch.nn.utils.rnn import pad_sequence
 from ..model import *
 from .dataset import FluentCommandsDataset
 
+import wandb
 
 class DownstreamExpert(nn.Module):
     """
@@ -27,11 +28,20 @@ class DownstreamExpert(nn.Module):
         self.upstream_dim = upstream_dim
         self.datarc = downstream_expert['datarc']
         self.modelrc = downstream_expert['modelrc']
+        if 'adapterConfig' in kwargs:
+            self.adapterConfig = kwargs['adapterConfig']
+            switch_ratio = self.adapterConfig.adapter.switch.ratio
+        else:
+            self.adapterConfig = None
+            print("[asr/expert.py] 105: No Adapter Config")
 
         self.get_dataset()
 
-        self.train_dataset = FluentCommandsDataset(self.train_df, self.base_path, self.Sy_intent)
-        self.switch_train_dataset = FluentCommandsDataset(self.switch_train_df, self.base_path, self.Sy_intent)
+        
+        full_train_dataset = FluentCommandsDataset(self.train_df, self.base_path, self.Sy_intent)
+        # self.switch_train_dataset = FluentCommandsDataset(self.switch_train_df, self.base_path, self.Sy_intent)
+        self.train_dataset, self.switch_train_dataset = \
+            torch.utils.data.random_split(full_train_dataset, [1 - switch_ratio, switch_ratio])
         self.dev_dataset = FluentCommandsDataset(self.valid_df, self.base_path, self.Sy_intent)
         self.test_dataset = FluentCommandsDataset(self.test_df, self.base_path, self.Sy_intent)
 
@@ -65,9 +75,10 @@ class DownstreamExpert(nn.Module):
             values_per_slot.append(len(slot_values))
         self.values_per_slot = values_per_slot
         self.Sy_intent = Sy_intent
-        self.switch_train_df = train_df.sample(frac=self.datarc['switch_ratio'])
-        self.train_df = train_df.drop(self.switch_train_df.index).reset_index()
-        self.switch_train_df = self.switch_train_df.reset_index()
+        # self.switch_train_df = train_df.sample(frac=self.datarc['switch_ratio'])
+        # self.train_df = train_df.drop(self.switch_train_df.index).reset_index()
+        # self.switch_train_df = self.switch_train_df.reset_index()
+        self.train_df = train_df
         self.valid_df = valid_df
         self.test_df = test_df
 
@@ -77,7 +88,7 @@ class DownstreamExpert(nn.Module):
             dataset, batch_size=self.datarc['train_batch_size'],
             shuffle=(sampler is None), sampler=sampler,
             num_workers=self.datarc['num_workers'],
-            collate_fn=dataset.collate_fn
+            collate_fn=dataset.dataset.collate_fn
         )
 
     def _get_eval_dataloader(self, dataset):
@@ -100,8 +111,12 @@ class DownstreamExpert(nn.Module):
         return self._get_eval_dataloader(self.test_dataset)
 
     # Interface
-    def get_dataloader(self, mode):
-        return eval(f'self.get_{mode}_dataloader')()
+    def get_dataloader(self, mode, epoch=None, **kwargs):
+        if mode == 'train':
+            return {'train': eval(f'self.get_train_dataloader')(),
+                    'switch': eval(f'self.get_switch_dataloader')()}
+        else:
+            return eval(f'self.get_{mode}_dataloader')()
 
     # Interface
     def forward(self, mode, features, labels, filenames, records, **kwargs):
@@ -146,6 +161,27 @@ class DownstreamExpert(nn.Module):
     # interface
     def log_records(self, mode, records, logger, global_step, **kwargs):
         save_names = []
+        wandb.define_metric("test-acc", summary="max")
+        wandb.define_metric("test-intent_loss", summary="min")
+        wandb.define_metric("dev-acc", summary="max")
+        wandb.define_metric("dev-intent_loss", summary="min")
+        wandb.define_metric("train-acc", summary="max")
+        wandb.define_metric("train-intent_loss", summary="min")
+        results = {}
+        key_prefix = f"{mode}"
+        if 'layers' in kwargs:
+            for i, layer in enumerate(kwargs['layers']):
+                # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
+                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                    results.update({f"layer_{i}/{key_prefix}_{j}": logit.item()})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+        if 'norm_weights' in kwargs:
+            for i, weight in enumerate(kwargs['norm_weights']):
+                results.update({f"{key_prefix}_norm_weights_{i}": weight})
+        if 'lr' in kwargs:
+            results.update({"lr": kwargs["lr"]})
+
+
         for key in ["acc", "intent_loss"]:
             values = records[key]
             average = torch.FloatTensor(values).mean().item()
@@ -162,6 +198,8 @@ class DownstreamExpert(nn.Module):
                         self.best_score = torch.ones(1).to(self.best_score.device) * average
                         f.write(f'New best on {mode} at step {global_step}: {average}\n')
                         save_names.append(f'{mode}-best.ckpt')
+
+        wandb.log(results, step=global_step)
 
         with open(Path(self.expdir) / f"{mode}_predict.csv", "w") as file:
             lines = [f"{f},{a},{o},{l}\n" for f, (a, o, l) in zip(records["filename"], records["predict"])]

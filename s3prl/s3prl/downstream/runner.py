@@ -37,7 +37,7 @@ linelogger = logging.getLogger(__name__)
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
 linelogger.setLevel(logging.INFO)
-from ..upstream.adapterModels import dict2obj, MyLogger
+from ..upstream.adapterModels import dict2obj, MyLogger, is_baseline
 # linelogger = MyLogger(linelogger)
 
 SAMPLE_RATE = 16000
@@ -117,9 +117,10 @@ class Runner():
         
         self.adapterDict = {'adapter': config['adapter_config']}
         self.adapter_config = dict2obj(self.adapterDict)
+        self.adapter_config.adapter.switch.baseline = is_baseline(self.adapter_config.adapter.switch.baseline)
         if self.args.mode == 'train':
             # train both stage1 and stage2
-            self.stage1_steps = int(self.args.stage1_ratio * self.config['runner']['total_steps'] * (self.adapter_config.adapter.switch.baseline < 0) // 2)
+            self.stage1_steps = int(self.args.stage1_ratio * self.config['runner']['total_steps'] * (not self.adapter_config.adapter.switch.baseline) // 2)
             self.stage2_steps = self.config['runner']['total_steps'] - self.stage1_steps * 2
         elif self.args.mode == 'train_stage1':
             self.stage1_steps = self.config['runner']['total_steps']
@@ -198,7 +199,7 @@ class Runner():
                     model_dict = model.state_dict()
                     for para, value in upstream_weight.items():
                         if 'adapter' in para:
-                            if 'switch' in para and self.adapter_config.adapter.switch.baseline >= 0:
+                            if 'switch' in para and self.adapter_config.adapter.switch.baseline:
                                 continue
                             model_dict.update({para: value})
                     
@@ -331,13 +332,13 @@ class Runner():
         return optimizer
 
 
-    def _get_scheduler(self, optimizer):
+    def _get_scheduler(self, optimizer, total_steps=0, scheduler_name='Scheduler'):
         scheduler = get_scheduler(
             optimizer,
-            self.config['runner']['total_steps'],
+            self.config['runner']['total_steps'] if total_steps == 0 else total_steps,
             self.config['scheduler']
         )
-        self._load_weight(scheduler, 'Scheduler')
+        self._load_weight(scheduler, scheduler_name)
         return scheduler
 
     def _create_model_card(self, path):
@@ -367,6 +368,9 @@ class Runner():
         trainable_w_paras = []
         # Architecture weights (switch)
         trainable_a_paras = []
+        # Featurizer paras
+        trainable_f_paras = []
+        
         additional_weight = [] # add prompt paras to optimizer
         for entry in self.all_entries:
             #### add the weight of prefix ###############
@@ -393,7 +397,10 @@ class Runner():
                     else:
                         param.requires_grad = False
                     
-                trainable_paras += list(additional_weight)       
+                trainable_paras += list(additional_weight)
+            elif entry.name == 'Featurizer' and not self.adapter_config.adapter.switch.baseline and self.args.f_lr:
+                linelogger.info("appending weight to f_optimizer")
+                trainable_f_paras += list(entry.model.parameters())
             elif entry.trainable:
                 linelogger.info(f"append weights: {entry.name}, {len(list(entry.model.parameters()))}")
                 trainable_w_paras += list(entry.model.parameters())
@@ -404,11 +411,16 @@ class Runner():
         # optimizer
         w_optimizer = self._get_optimizer(trainable_w_paras, 'w_optimizer', [])
         a_optimizer = self._get_optimizer(trainable_a_paras, 'a_optimizer', [])
-
+        if len(trainable_f_paras):
+            f_optimizer = self._get_optimizer(trainable_f_paras, 'f_optimizer', [])
+        
         # scheduler
         scheduler = None
+        f_scheduler = None
         if self.config.get('scheduler'):
             scheduler = self._get_scheduler(w_optimizer)
+            if len(trainable_f_paras):
+                f_scheduler = self._get_scheduler(f_optimizer, self.stage2_steps, scheduler_name='f_scheduler')
 
         # specaug
         specaug = None
@@ -600,12 +612,18 @@ class Runner():
                         print(f'[Runner] - grad norm is NaN at step {global_step}, mode {adapterMode}')
                     else:
                         optimizer.step()
+                        if self.stage == 2 and len(trainable_f_paras):
+                            f_optimizer.step()
+                            f_optimizer.zero_grad()
                     optimizer.zero_grad()
                     
                     # adjust learning rate
                     if lr_scheduler:
                         # linelogger.info(lr_scheduler.get_last_lr()[0])
                         lr_scheduler.step()
+
+                    if self.stage == 2 and f_scheduler:
+                        f_scheduler.step()
                         
                 
                 if backward_steps % gradient_accumulate_steps > 0:
@@ -622,7 +640,6 @@ class Runner():
                     continue
 
                 # logging
-                
                 if global_step % self.config['runner']['log_step'] == 0:
                     self.downstream.model.log_records(
                         train_split,
@@ -635,6 +652,7 @@ class Runner():
                         layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
                         norm_weights = self.featurizer.model.module.norm_weights.detach(),
                         lr = scheduler.get_last_lr()[0] if scheduler else 0,
+                        f_lr = f_scheduler.get_last_lr()[0] if (self.stage == 2 and f_scheduler) else 0,
                         to_wandb = True
                     )
                     batch_ids = []
@@ -689,6 +707,9 @@ class Runner():
 
                     if scheduler:
                         all_states['Scheduler'] = scheduler.state_dict()
+
+                    if f_scheduler:
+                        all_states['f_scheduler'] = f_scheduler.state_dict()
 
                     if is_initialized():
                         all_states['WorldSize'] = get_world_size()

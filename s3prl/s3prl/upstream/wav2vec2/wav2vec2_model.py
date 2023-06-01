@@ -845,26 +845,28 @@ class MultiheadAttention(nn.Module):
             "Self-attention requires query, key and " "value to be of the same size"
         )
 
+        self.use_lora = False
 
         ####LoRA####
-        if adapterConfig.adapter.type == 'lora':  # 'lora' in sys.argv[-1]:
-            self.k_proj = quant_noise(
-                lora.Linear(self.kdim, embed_dim, r=8), q_noise, qn_block_size
+        if adapterConfig.adapter.exist and 'lora' in adapterConfig.adapter.type:  # 'lora' in sys.argv[-1]:
+            self.lora_v_proj = quant_noise(
+                lora.Linear(self.vdim, embed_dim, r=8), q_noise, qn_block_size
             )
 
-            self.q_proj = quant_noise(
+            self.lora_q_proj = quant_noise(
                 lora.Linear(embed_dim, embed_dim, r=8), q_noise, qn_block_size
             )
-        else:
-            self.k_proj = quant_noise(
-                nn.Linear(self.kdim, embed_dim, bias=bias), q_noise, qn_block_size
-            )
-            
-            self.q_proj = quant_noise(
-                nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
-            )
+            self.use_lora = True
+
         self.v_proj = quant_noise(
-                nn.Linear(self.vdim, embed_dim, bias=bias), q_noise, qn_block_size
+            nn.Linear(self.vdim, embed_dim, bias=bias), q_noise, qn_block_size
+        )
+        
+        self.q_proj = quant_noise(
+            nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
+        )
+        self.k_proj = quant_noise(
+                nn.Linear(self.kdim, embed_dim, bias=bias), q_noise, qn_block_size
             )
 
         self.out_proj = quant_noise(
@@ -894,10 +896,14 @@ class MultiheadAttention(nn.Module):
             nn.init.xavier_uniform_(self.k_proj.weight, gain=1 / math.sqrt(2))
             nn.init.xavier_uniform_(self.v_proj.weight, gain=1 / math.sqrt(2))
             nn.init.xavier_uniform_(self.q_proj.weight, gain=1 / math.sqrt(2))
+            nn.init.xavier_uniform_(self.lora_v_proj.weight, gain=1 / math.sqrt(2))
+            nn.init.xavier_uniform_(self.lora_q_proj.weight, gain=1 / math.sqrt(2))
         else:
             nn.init.xavier_uniform_(self.k_proj.weight)
             nn.init.xavier_uniform_(self.v_proj.weight)
             nn.init.xavier_uniform_(self.q_proj.weight)
+            nn.init.xavier_uniform_(self.lora_v_proj.weight)
+            nn.init.xavier_uniform_(self.lora_q_proj.weight)
 
         nn.init.xavier_uniform_(self.out_proj.weight)
         if self.out_proj.bias is not None:
@@ -911,6 +917,10 @@ class MultiheadAttention(nn.Module):
         k_proj_heads_norm = []
         q_proj_heads_norm = []
         v_proj_heads_norm = []
+        lora_q_proj_heads_norm = []
+        lora_v_proj_heads_norm = []
+
+        raise Exception('Fuck fairseq _get_reserve_head_index')
 
         for i in range(self.num_heads):
             start_idx = i * self.head_dim
@@ -945,6 +955,28 @@ class MultiheadAttention(nn.Module):
                 ).tolist()
                 + torch.sum(torch.abs(self.v_proj.bias[start_idx:end_idx])).tolist()
             )
+            if self.use_lora:
+                lora_q_proj_heads_norm.append(
+                    torch.sum(
+                        torch.abs(
+                            self.lora_q_proj.weight[
+                                start_idx:end_idx,
+                            ]
+                        )
+                    ).tolist()
+                    + torch.sum(torch.abs(self.lora_q_proj.bias[start_idx:end_idx])).tolist()
+                )
+                lora_v_proj_heads_norm.append(
+                    torch.sum(
+                        torch.abs(
+                            self.lora_v_proj.weight[
+                                start_idx:end_idx,
+                            ]
+                        )
+                    ).tolist()
+                    + torch.sum(torch.abs(self.lora_v_proj.bias[start_idx:end_idx])).tolist()
+                )
+
 
         heads_norm = []
         for i in range(self.num_heads):
@@ -970,6 +1002,8 @@ class MultiheadAttention(nn.Module):
         new_v_weight = []
         new_v_bias = []
         new_out_proj_weight = []
+
+        raise Exception('Fuck fairseq _adaptive_prune_heads')
 
         for ele in reserve_head_index:
             start_idx, end_idx = ele
@@ -1102,7 +1136,7 @@ class MultiheadAttention(nn.Module):
         attn_mask: Optional[Tensor] = None,
         before_softmax: bool = False,
         need_head_weights: bool = False,
-    ) -> Tuple[Tensor, Optional[Tensor]]:
+    ) -> Tuple[Tensor, Optional[Tensor]]:  # (skip, lora)
         """Input shape: Time x Batch x Channel
 
         Args:
@@ -1157,10 +1191,10 @@ class MultiheadAttention(nn.Module):
             if self.use_xformers:
                 return self._xformers_attn_forward(
                     query, key, value, key_padding_mask, need_weights, attn_mask
-                )
+                ), None
 
             else:
-                return F.multi_head_attention_forward(
+                return (F.multi_head_attention_forward(
                     query,
                     key,
                     value,
@@ -1182,7 +1216,31 @@ class MultiheadAttention(nn.Module):
                     q_proj_weight=self.q_proj.weight,
                     k_proj_weight=self.k_proj.weight,
                     v_proj_weight=self.v_proj.weight,
+                ),  F.multi_head_attention_forward(
+                    query,
+                    key,
+                    value,
+                    self.embed_dim,
+                    self.num_heads,
+                    torch.empty([0]),
+                    torch.cat((self.lora_q_proj.bias, self.k_proj.bias, self.lora_v_proj.bias)),
+                    self.bias_k,
+                    self.bias_v,
+                    self.add_zero_attn,
+                    self.dropout_module.p,
+                    self.out_proj.weight,
+                    self.out_proj.bias,
+                    self.training or self.dropout_module.apply_during_inference,
+                    key_padding_mask,
+                    need_weights,
+                    attn_mask,
+                    use_separate_proj_weight=True,
+                    q_proj_weight=self.lora_q_proj.weight,
+                    k_proj_weight=self.k_proj.weight,
+                    v_proj_weight=self.lora_v_proj.weight,
+                ) if self.use_lora else None
                 )
+
 
         if incremental_state is not None:
             saved_state = self._get_input_buffer(incremental_state)
@@ -1199,12 +1257,15 @@ class MultiheadAttention(nn.Module):
             q = self.q_proj(query)
             k = self.k_proj(query)
             v = self.v_proj(query)
+            lora_q = self.lora_q_proj(query) if self.use_lora else None
+            lora_v = self.lora_v_proj(query) if self.use_lora else None
         elif self.encoder_decoder_attention:
             # encoder-decoder attention
             q = self.q_proj(query)
+            lora_q = self.lora_q_proj(query) if self.use_lora else None
             if key is None:
                 assert value is None
-                k = v = None
+                k = v = lora_v = None
             else:
                 if self.beam_size > 1 and bsz == key.size(1):
                     # key is [T, bsz*beam_size, C], reduce to [T, bsz, C]
@@ -1217,25 +1278,38 @@ class MultiheadAttention(nn.Module):
                         )[:, 0, :]
                 k = self.k_proj(key)
                 v = self.v_proj(key)
+                lora_v = self.lora_v_proj(key) if self.use_lora else None
 
         else:
             assert key is not None and value is not None
             q = self.q_proj(query)
             k = self.k_proj(key)
             v = self.v_proj(value)
+            lora_q = self.lora_q_proj(query) if self.use_lora else None
+            lora_v = self.lora_v_proj(value) if self.use_lora else None
         q *= self.scaling
+        if self.use_lora:
+            lora_q *= self.scaling
 
         if self.bias_k is not None:
             assert self.bias_v is not None
             k, v, attn_mask, key_padding_mask = self._add_bias(
                 k, v, attn_mask, key_padding_mask, bsz
             )
+            raise NotImplementedError('if raised, need fix.')
 
         q = (
             q.contiguous()
             .view(tgt_len, bsz * self.num_heads, self.head_dim)
             .transpose(0, 1)
         )
+
+        lora_q = (
+            lora_q.contiguous()
+            .view(tgt_len, bsz * self.num_heads, self.head_dim)
+            .transpose(0, 1)
+        ) if self.use_lora else None
+
         kv_bsz = bsz  # need default value for scripting
         if k is not None:
             kv_bsz = k.size(1)
@@ -1251,7 +1325,15 @@ class MultiheadAttention(nn.Module):
                 .transpose(0, 1)
             )
 
+        if lora_v is not None:
+            lora_v = (
+                lora_v.contiguous()
+                .view(-1, kv_bsz * self.num_heads, self.head_dim)
+                .transpose(0, 1)
+            )
+
         if saved_state is not None:
+            raise NotImplementedError('Fuck saved_state need fix')
             # saved states are stored with shape (bsz, num_heads, seq_len, head_dim)
             if "prev_key" in saved_state:
                 _prev_key = saved_state["prev_key"]
@@ -1311,9 +1393,15 @@ class MultiheadAttention(nn.Module):
         if self.add_zero_attn:
             assert v is not None
             src_len += 1
+            tmp_k = torch.Tensor.copy_(k)
             k, v, key_padding_mask, attn_mask = self._append_zero_attn(
                 k=k, v=v, key_padding_mask=key_padding_mask, attn_mask=attn_mask
             )
+            if self.use_lora:
+                lora_k, lora_v, key_padding_mask, attn_mask = self._append_zero_attn(
+                    k=tmp_k, v=lora_v, key_padding_mask=key_padding_mask, attn_mask=attn_mask
+                )
+
 
         if self.encoder_decoder_attention and bsz != kv_bsz:
             attn_weights = torch.einsum(
@@ -1322,10 +1410,20 @@ class MultiheadAttention(nn.Module):
                 k.view((kv_bsz, self.num_heads) + k.size()[1:]),
             )
             attn_weights = attn_weights.reshape((-1,) + attn_weights.size()[-2:])
+            if self.use_lora:
+                lora_attn_weights = torch.einsum(
+                    "bxhtd,bhsd->bxhts",
+                    lora_q.view((kv_bsz, -1, self.num_heads) + lora_q.size()[1:]),
+                    lora_k.view((kv_bsz, self.num_heads) + lora_k.size()[1:]),
+                )
+                lora_attn_weights = lora_attn_weights.reshape((-1,) + lora_attn_weights.size()[-2:])
         else:
             attn_weights = torch.bmm(q, k.transpose(1, 2))
+            if self.use_lora:
+                lora_attn_weights = torch.bmm(lora_q, lora_k.transpose(1, 2))
         attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)
-
+        if self.use_lora:
+            lora_attn_weights = self.apply_sparse_mask(lora_attn_weights, tgt_len, src_len, bsz)
         assert list(attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
 
         if attn_mask is not None:
@@ -1333,10 +1431,14 @@ class MultiheadAttention(nn.Module):
             if self.onnx_trace:
                 attn_mask = attn_mask.repeat(attn_weights.size(0), 1, 1)
             attn_weights += attn_mask
+            if self.use_lora:
+                lora_attn_weights += attn_mask
 
         if key_padding_mask is not None:
             # don't attend to padding symbols
             attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            if self.use_lora:
+                lora_attn_weights = lora_attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
             if not is_tpu:
                 attn_weights = attn_weights.view(
                     kv_bsz, -1, self.num_heads, tgt_len, src_len
@@ -1348,14 +1450,31 @@ class MultiheadAttention(nn.Module):
                     .to(torch.bool),
                     float("-inf"),
                 )
+                if self.use_lora:
+                    lora_attn_weights = lora_attn_weights.view(
+                        kv_bsz, -1, self.num_heads, tgt_len, src_len
+                    )
+                    lora_attn_weights = lora_attn_weights.masked_fill(
+                        key_padding_mask.unsqueeze(1)
+                        .unsqueeze(2)
+                        .unsqueeze(3)
+                        .to(torch.bool),
+                        float("-inf"),
+                    )
             else:
                 attn_weights = attn_weights.transpose(0, 2)
                 attn_weights = attn_weights.masked_fill(key_padding_mask, float("-inf"))
                 attn_weights = attn_weights.transpose(0, 2)
+                if self.use_lora:
+                    lora_attn_weights = lora_attn_weights.transpose(0, 2)
+                    lora_attn_weights = lora_attn_weights.masked_fill(key_padding_mask, float("-inf"))
+                    lora_attn_weights = lora_attn_weights.transpose(0, 2)
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+            if self.use_lora:
+                lora_attn_weights = lora_attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
         if before_softmax:
-            return attn_weights, v
+            return ((attn_weights, v), (lora_attn_weights, lora_v))
 
         def softmax_supporting_onnx_trace(x, dim: int, onnx_trace: bool = False):
             if onnx_trace:
@@ -1368,6 +1487,14 @@ class MultiheadAttention(nn.Module):
         )
         attn_weights = attn_weights_float.type_as(attn_weights)
         attn_probs = self.dropout_module(attn_weights)
+
+        if self.use_lora:
+            lora_attn_weights_float = softmax_supporting_onnx_trace(
+                lora_attn_weights, dim=-1, onnx_trace=self.onnx_trace
+            )
+            lora_attn_weights = lora_attn_weights_float.type_as(lora_attn_weights)
+            lora_attn_probs = self.dropout_module(lora_attn_weights)
+
 
         assert v is not None
         if self.encoder_decoder_attention and bsz != kv_bsz:
@@ -1390,8 +1517,30 @@ class MultiheadAttention(nn.Module):
                 ),
             )
             attn = attn.reshape((-1,) + attn.size()[-2:])
+            if self.use_lora:
+                lora_attn = torch.einsum(
+                    "bxhts,bhsd->bxhtd",
+                    lora_attn_probs.view(
+                        (
+                            kv_bsz,
+                            -1,
+                            self.num_heads,
+                        )
+                        + lora_attn_probs.size()[1:]
+                    ),
+                    lora_v.view(
+                        (
+                            kv_bsz,
+                            self.num_heads,
+                        )
+                        + lora_v.size()[1:]
+                    ),
+                )
+                lora_attn = lora_attn.reshape((-1,) + lora_attn.size()[-2:])
         else:
             attn = torch.bmm(attn_probs, v)
+            if self.use_lora:
+                lora_attn = torch.bmm(lora_attn_probs, lora_v)
         assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
         if self.onnx_trace and attn.size(1) == 1:
             # when ONNX tracing a single decoder step (sequence length == 1)
@@ -1399,8 +1548,18 @@ class MultiheadAttention(nn.Module):
             attn = attn.contiguous().view(tgt_len, bsz, self.embed_dim)
         else:
             attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, self.embed_dim)
+        if self.onnx_trace and self.use_lora and lora_attn.size(1) == 1:
+            # when ONNX tracing a single decoder step (sequence length == 1)
+            # the transpose is a no-op copy before view, thus unnecessary
+            lora_attn = lora_attn.contiguous().view(tgt_len, bsz, self.embed_dim)
+        else:
+            lora_attn = lora_attn.transpose(0, 1).contiguous().view(tgt_len, bsz, self.embed_dim)
+        
         attn = self.out_proj(attn)
         attn_weights: Optional[Tensor] = None
+        if self.use_lora:
+            lora_attn = self.out_proj(lora_attn)
+            lora_attn_weights = None
         if need_weights:
             attn_weights = attn_weights_float.view(
                 bsz, self.num_heads, tgt_len, src_len
@@ -1408,8 +1567,15 @@ class MultiheadAttention(nn.Module):
             if not need_head_weights:
                 # average attention weights over heads
                 attn_weights = attn_weights.mean(dim=0)
+            if self.use_lora:
+                lora_attn_weights = lora_attn_weights_float.view(
+                    bsz, self.num_heads, tgt_len, src_len
+                ).transpose(1, 0)
+                if not need_head_weights:
+                    # average attention weights over heads
+                    lora_attn_weights = lora_attn_weights.mean(dim=0)
 
-        return attn, attn_weights
+        return ((attn, attn_weights), (lora_attn, lora_attn_weights))
 
     @staticmethod
     def _append_prev_key_padding_mask(
@@ -3282,11 +3448,11 @@ class TransformerSentenceEncoderLayer(nn.Module):
         )
 
         # print('3254', sys.argv)
-        if adapterConfig.adapter.exist and adapterConfig.adapter.type == 'adapterbias': # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+        if adapterConfig.adapter.exist and 'adapterbias' in adapterConfig.adapter.type: # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
             print('AdapterBias!!!')
             self.adapter_vector = nn.Parameter(torch.ones((768), requires_grad=True))
             self.adapter_alpha = nn.Linear(ffn_embedding_dim, 1) #每個layer的xi都不一樣
-        elif adapterConfig.adapter.exist and adapterConfig.adapter.type == 'houlsby':
+        elif adapterConfig.adapter.exist and 'houlsby' in adapterConfig.adapter.type:
             print('Houlsby!!!')
             self.seq_adapter = nn.Sequential(
                 nn.Linear(self.embedding_dim, 32),
@@ -3298,7 +3464,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 nn.GELU(),
                 nn.Linear(32, self.embedding_dim),
             )
-        elif adapterConfig.adapter.exist and adapterConfig.adapter.type == 'lora':
+        elif adapterConfig.adapter.exist and 'lora' in adapterConfig.adapter.type:
             print('LoRA!!!')
         else:
             print('Original Hubert!!!')
@@ -3370,15 +3536,16 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             x = self.dropout3(x)
 
-            
-            if self.adapterConfig.adapter.exist and self.adapterConfig.adapter.type == 'adapterbias':  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
-                adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
-                x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
-                parallel_output = self.adapter_vector * self.adapter_alpha(residual)
-            elif self.adapterConfig.adapter.type == 'houlsby': # 'houlsby' in sys.argv[-1]:
-                adapter_output = self.seq_adapter(houlsby_input)
-                x = x + residual # +  self.seq_adapter(houlsby_input)
-                parallel_output = self.parallel_adapter(parallel_input)
+            ## 3374 remember NEED FIX!!!!!
+            if self.adapterConfig.adapter.exist:
+                if 'adapterbias' in self.adapterConfig.adapter.type:  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+                    adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
+                    x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
+                    parallel_output = self.adapter_vector * self.adapter_alpha(residual)
+                if 'houlsby' in self.adapterConfig.adapter.type: # 'houlsby' in sys.argv[-1]:
+                    adapter_output = self.seq_adapter(houlsby_input)
+                    x = x + residual # +  self.seq_adapter(houlsby_input)
+                    parallel_output = self.parallel_adapter(parallel_input)
             else:
                 x = x + residual
             

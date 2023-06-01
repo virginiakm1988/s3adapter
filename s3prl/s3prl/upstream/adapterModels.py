@@ -561,6 +561,9 @@ class AdapterSwitch(nn.Module):
         self.switch_mode()
         if not self.training or self.config.stage == 2 or (self.fixed_idx < len(self.switch_logits) and self.probs[self.fixed_idx] > self.config.fix_thres):
             assert(self.fixed_idx < len(self.switch_logits))
+            if self.probs[self.fixed_idx] > self.config.fix_thres:
+                logging.warning(f"fixed_idx = {self.fixed_idx}, probs = {self.probs[self.fixed_idx]}")
+                
             self.switch_logits.requires_grad = False
             # logger.info(f'{x.shape},  {self.fixed_idx} {x[:, :, self.fixed_idx, :].shape}')
             return x[:, :, self.fixed_idx, :].transpose(0, 1)

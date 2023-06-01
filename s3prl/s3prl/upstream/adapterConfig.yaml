@@ -1,6 +1,6 @@
 adapter:
   exist: true
-  type: houlsby
+  type: [houlsby, lora]
   switch: 
     first: false
     exist: true

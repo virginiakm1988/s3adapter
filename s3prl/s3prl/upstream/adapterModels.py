@@ -512,6 +512,7 @@ class AdapterSwitch(nn.Module):
         # self.soft_logits = self.probs()
         logger.info(f"paths = {len(initial_logits)}")
         self.prev_mode = None
+        self.fixed_idx = len(initial_logits)
         
     @property
     def probs(self):
@@ -529,17 +530,20 @@ class AdapterSwitch(nn.Module):
             # self.soft_logits = torch.softmax(self.switch_logits / self.switch_temperature[0], -1)
             logger.info(f'path index after layer_{self.layer_idx}: {self.fixed_idx}')
         else:
-            self.fixed_idx = None
+            pass
+            # self.fixed_idx = None
         return super().train(mode)
 
     def switch_mode(self):
         if self.prev_mode and not self.switch_logits.requires_grad:
             self.fixed_idx = self.get_arch()
+            # logging.warning(f"triggered {self.fixed_idx}")
         
         self.prev_mode = self.switch_logits.requires_grad
         return self.prev_mode
             
 
+    '''
     def eval(self, mode: bool = False):
         self.training = mode
         # logger.info(f"eval invoked, mode = {mode}")
@@ -549,13 +553,15 @@ class AdapterSwitch(nn.Module):
         else:
             self.fixed_idx = None
         return super().eval(mode)
-
+    '''
     def forward(self, x):
         x = x.transpose(0, 1)
         batch_size, seq_length, num_classes, hidden_dim_size = x.size()
         # print('477', self.switch_logits)
         self.switch_mode()
-        if not self.training or self.config.stage == 2:
+        if not self.training or self.config.stage == 2 or (self.fixed_idx < len(self.switch_logits) and self.probs[self.fixed_idx] > self.config.fix_thres):
+            assert(self.fixed_idx < len(self.switch_logits))
+            self.switch_logits.requires_grad = False
             # logger.info(f'{x.shape},  {self.fixed_idx} {x[:, :, self.fixed_idx, :].shape}')
             return x[:, :, self.fixed_idx, :].transpose(0, 1)
 
@@ -576,7 +582,7 @@ class AdapterSwitch(nn.Module):
         weights = torch.softmax((g + self.switch_logits) / self.switch_temperature[0], dim=-1)
         # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
         
-        if self.hard:  # and self.switch_mode():
+        if self.hard and (self.switch_logits.requires_grad or not self.config.soft_adapter):
             y_hard = Gumbel.onehot_from_logits(weights)
             #print(y_hard[0], "random")
             weights = (y_hard - weights).detach() + weights

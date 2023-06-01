@@ -1124,7 +1124,7 @@ class MultiheadAttention(nn.Module):
             need_weights = True
 
         is_tpu = query.device.type == "xla"
-        # print('ssssss', query.size())
+        # logging.warning(f'ssssss {query.size()}')
         tgt_len, bsz, embed_dim = query.size()
         src_len = tgt_len
         if not self.skip_embed_dim_check:
@@ -3337,7 +3337,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         residual = x
         adapter_output = parallel_output = None
         parallel_input = x
-        # print('3298', residual.shape)
+        # logging.warning(f"{residual.shape}")
         if self.layer_norm_first:
             x = self.self_attn_layer_norm(x)
             x, attn = self.self_attn(

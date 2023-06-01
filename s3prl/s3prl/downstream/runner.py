@@ -622,8 +622,8 @@ class Runner():
                         print(f'[Runner] - grad norm is NaN at step {global_step}, mode {adapterMode}')
                     else:
                         optimizer.step()
-                        if f_optimizer and (self.stage == 2 or (self.args.f_lr_stage == 1 and adapterMode == 'switch')):
-                            # only use f_optimizer if 11) it is not none and (2) at stage 2 or (training switch at stage 1) 
+                        if f_optimizer and (self.stage == 2 or (self.args.f_lr_stage == 1 and adapterMode == self.args.f_lr_mode)):
+                            # only use f_optimizer if (1) it is not none and (2) at stage 2 or (training with self.args.f_lr_mode at stage 1) 
                             f_optimizer.step()
                             f_optimizer.zero_grad()
                     optimizer.zero_grad()
@@ -633,7 +633,7 @@ class Runner():
                         # linelogger.info(lr_scheduler.get_last_lr()[0])
                         lr_scheduler.step()
 
-                    if f_scheduler and (self.stage == 2 or (self.args.f_lr_stage == 1 and adapterMode == 'switch')):
+                    if f_scheduler and (self.stage == 2 or (self.args.f_lr_stage == 1 and adapterMode == self.args.f_lr_mode)):
                         f_scheduler.step()
                         
                 

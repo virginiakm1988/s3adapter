@@ -20,15 +20,16 @@ ngpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d ctc -m train -f -n {exp dir name} -uac upstream/adapterConfig.yaml -c downstream/ctc/libriphone.yaml --ngpu ${ngpus} --online -o "config.runner.gradient_accumulate_steps={original steps / 2}" --stage1_ratio=0.5
 
 SD:
-python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d diarization -m train -f -n hubert_sd_25_flr_tau -uac upstream/adapterConfig.yaml -c downstream/diarization/config.yaml --ngpu ${ngpus} --online -o "config.runner.gradient_accumulate_steps=2,,config.adapter_config.switch.tau.init_value=10,,config.adapter_config.switch.tau.stop_value=0.1" --stage1_ratio=0.25 --f_lr
+python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d diarization -m train -f -n hubert_sd_full -uac upstream/adapterConfig.yaml -c downstream/diarization/config.yaml --ngpu ${ngpus} --online -o "config.runner.gradient_accumulate_steps=2,,config.adapter_config.switch.baseline=[0,2,2,2,0,0,0,0,2,0,0,2]"
 
 If you want to tune featurizer with switch logits, specify **--f_lr_stage=1** when running the code.
+Also, sepcify **--f_lr_mode=train** if you want to train featurizer from stage1 with network weights.
 
 ** Testing **
 python3 run_downstream.py -m evaluate -t {testing split} -i {ckpt} -c downstream/ctc/libriphone.yaml --adapter=houlsby -u hubert -d ctc -uac upstream/adapterConfig.yaml -n {exp name}
 
 SD:
-python3 run_downstream.py -m evaluate -e result/downstream/hubert_sd_25_flr_tau/best-states-dev.ckpt -c downstream/diarization/config.yaml --adapter=houlsby -u hubert -d diarization -uac upstream/adapterConfig.yaml
+python3 run_downstream.py -m evaluate -e result/downstream/hubert_sd_full/best-states-dev.ckpt -c downstream/diarization/config.yaml --adapter=houlsby -u hubert -d diarization -uac upstream/adapterConfig.yaml
 
 ./downstream/diarization/score.sh result/downstream/hubert_sd_fullytrained downstream/diarization/data/test
 

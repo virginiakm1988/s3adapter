@@ -80,6 +80,7 @@ def get_downstream_args():
     parser.add_argument('--ngpu', type=int, default=1)
     parser.add_argument('--f_lr', action='store_true', help="reschedule featurizer lr")
     parser.add_argument('--f_lr_stage', type=int, help="stage to start training featurizer", default=2)
+    parser.add_argument('--f_lr_mode', type=str, help="parameters train with weighted sum at stage 1", default="switch")
     parser.add_argument('-r', '--upstream_refresh', action='store_true', help='Re-download cached ckpts for on-the-fly upstream variants')
     parser.add_argument('-f', '--upstream_trainable', action='store_true', help='Fine-tune, set upstream.train(). Default is upstream.eval()')
     parser.add_argument('-s', '--upstream_feature_selection', default='hidden_states', help='Specify the layer to be extracted as the representation')

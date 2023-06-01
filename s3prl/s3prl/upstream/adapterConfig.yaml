@@ -14,6 +14,8 @@ adapter:
     ratio: 0.5
     # freq: 0.1  # 0~1
     baseline: -1
+    fix_thres: 0.8
+    soft_adapter: False
 
   houlsby:
     input: false

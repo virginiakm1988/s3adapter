@@ -3553,13 +3553,25 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
                 x = self.adapterswitch(adapterStack)
         else:
-            x, attn = self.self_attn(
+            normal_output, lora_output = self.self_attn(
                 query=x,
                 key=x,
                 value=x,
                 key_padding_mask=self_attn_padding_mask,
                 need_weights=False,
             )
+
+            x, attn = normal_output
+
+            if self.use_lora:
+                lora_x, lora_attn = lora_output # lora_attn?
+                lora_x = self.dropout1(lora_x)
+                lora_x = residual + lora_x
+                lora_x = self.self_attn_layer_norm(lora_x)
+                lora_x = self.activation_fn(lora_x)
+                lora_x = self.dropout2(lora_x)
+                lora_x = self.fc2(lora_x)
+                lora_x = self.dropout3(lora_x)
 
             x = self.dropout1(x)
             x = residual + x
@@ -3580,11 +3592,12 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
             x = self.dropout3(x)
 
-            if self.adapterConfig.adapter.exist and self.adapterConfig.adapter.type == 'adapterbias':  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+            # next line need to be fixed if we add adapterbias, adapter_output is overwritten.
+            if self.adapterConfig.adapter.exist and 'adapterbias' in self.adapterConfig.adapter.type:  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
                 adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
                 x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
                 parallel_output = self.adapter_vector * self.adapter_alpha(residual)
-            elif self.adapterConfig.adapter.type == 'houlsby': # 'houlsby' in sys.argv[-1]:
+            elif 'houlsby' in self.adapterConfig.adapter.type: # 'houlsby' in sys.argv[-1]:
                 adapter_output = self.seq_adapter(houlsby_input)
                 x = x + residual # +  self.seq_adapter(houlsby_input)
                 parallel_output = self.parallel_adapter(parallel_input)
@@ -3592,7 +3605,10 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 x = x + residual
             
             if adapter_output is not None:
-                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
+                if self.use_lora:
+                    adapterStack = torch.stack([x + adapter_output, x, x + parallel_output, lora_x], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
+                else:
+                    adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
                 x = self.adapterswitch(adapterStack)
             x = self.final_layer_norm(x)
 

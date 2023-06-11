@@ -8,6 +8,7 @@ import random
 import tempfile
 import importlib
 from pathlib import Path
+from copy import deepcopy
 
 import torch
 import torchaudio
@@ -37,7 +38,7 @@ linelogger = logging.getLogger(__name__)
 FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
 linelogger.setLevel(logging.INFO)
-from ..upstream.adapterModels import dict2obj, MyLogger, is_baseline
+from ..upstream.adapterModels import dict2obj, MyLogger, is_baseline, find_module
 # linelogger = MyLogger(linelogger)
 
 SAMPLE_RATE = 16000
@@ -131,16 +132,6 @@ class Runner():
         else:
             self.stage1_steps = self.stage2_steps = 1
 
-
-        if is_leader_process():
-            print("*******************************************")
-            print()
-            print(f"(stage1_steps, stage2_steps, total_steps) = ({self.stage1_steps}, {self.stage2_steps}, {self.config['runner']['total_steps']})")
-            print("A step in stage1 will update both network weights and switch logits. As a result, the effective # of steps equals to 2.")
-            print(f"2 * stage1_steps + stage2_steps = 2 * {self.stage1_steps} + {self.stage2_steps} = {2 * self.stage1_steps + self.stage2_steps} = total steps")
-            print()
-            print("*******************************************")
-
         self.config['runner']['total_steps'] = self.stage1_steps + self.stage2_steps
 
         self.adapter_config.adapter.switch.tau.steps = self.stage1_steps
@@ -155,6 +146,11 @@ class Runner():
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.steps}, {self.adapter_config.adapter.switch.tau.stop_value}")
         
         self.upstream = self._get_upstream()
+        # with open('model_file.txt', 'w') as f1:
+        #     for name, value in self.upstream.model.named_parameters():
+        #         if "self_attn" in name:
+        #             print(f'{name}: {value}', file=f1)
+        # exit(0)
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
         self.all_entries = [self.upstream, self.featurizer, self.downstream]
@@ -202,7 +198,7 @@ class Runner():
                             if 'switch' in para and self.adapter_config.adapter.switch.baseline:
                                 continue
                             model_dict.update({para: value})
-                    
+                    # Notice: When using LoRA or LNFit, the initialization weight should be the same as the original pretrained weight.
                     show(f'[Runner] - Loading {"Adapter"} weights from the previous experiment')
                     model.load_state_dict(model_dict)
         elif name == 'Downstream':
@@ -264,6 +260,20 @@ class Runner():
             refresh = upstream_refresh,
             adapterConfig = self.adapter_config,
         ).to(self.args.device)
+
+        # if 'lnfit' in self.adapter_config.adapter.type:
+        for name, _ in model.model.named_parameters():
+            if '_layer_norm' in name and 'lnfit' not in name:
+                parent_key = ".".join(name.split('.')[:-1])
+                parent, _, original_ln = find_module(model.model, parent_key)
+                child_key =["deltaList", f"{parent.adapterIdx['lnfit']}", f"lnfit_{name.split('.')[-2]}"]
+                for key in child_key[:-1]:
+                    parent = getattr(parent, key)
+                setattr(
+                    parent, 
+                    child_key[-1], 
+                    deepcopy(original_ln)
+                )
 
         if is_initialized() and get_rank() == 0:
             torch.distributed.barrier()
@@ -351,7 +361,19 @@ class Runner():
 
     def prepare_stage(self, stage: int):
         self.upstream.model.module.model.set_stage(stage)
-            
+        # self.upstream.model.model.set_stage(stage)
+        for entry in self.all_entries:
+            if self.args.adapter != False and entry.name == "Upstream":
+                for name, param in entry.model.named_parameters():
+                    if "adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
+                        param.requires_grad = True
+                    else:
+                        param.requires_grad = False
+            if entry.name == "Featurizer":
+                for name, param in entry.model.named_parameters():
+                    param.requires_grad = (stage == 1 and self.args.stage1_weighted_sum) \
+                                            or (stage == 2 and self.args.stage2_weighted_sum) \
+                                                or (self.args.f_lr and stage >= self.args.f_lr_stage)
         if stage == 1:
             # if not self.args.stage1_weighted_sum:
             if not self.args.f_lr or self.args.f_lr_stage == 2:
@@ -364,8 +386,6 @@ class Runner():
             self.featurizer.model.train()
     @ddprecod
     def train(self):
-        
-            
         # trainable parameters and train/eval mode
         trainable_paras = []
         # Network weights
@@ -375,6 +395,9 @@ class Runner():
         # Featurizer paras
         trainable_f_paras = []
         
+        trainable_a_names  = []
+        trainable_w_names = []
+
         additional_weight = [] # add prompt paras to optimizer
         for entry in self.all_entries:
             #### add the weight of prefix ###############
@@ -392,12 +415,14 @@ class Runner():
             #### add adapters ##################
             if self.args.adapter != None and entry.name == "Upstream":
                 for name, param in entry.model.named_parameters():
-                    if "adapter" in name or 'lora' in name:
+                    if "adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
                         param.requires_grad = True
                         if 'switch' in name:
                             trainable_a_paras.append(param)
+                            trainable_a_names.append(name)
                         else:
                             trainable_w_paras.append(param)
+                            trainable_w_names.append(name)
                     else:
                         param.requires_grad = False
                     
@@ -408,6 +433,7 @@ class Runner():
             elif entry.trainable:
                 linelogger.info(f"append weights: {entry.name}, {len(list(entry.model.parameters()))}")
                 trainable_w_paras += list(entry.model.parameters())
+                trainable_w_names.append(entry.name)
             else:
                 linelogger.info(f'in eval: {entry.name}')
                 entry.model.eval()
@@ -453,7 +479,7 @@ class Runner():
         delta_step = 0
         batch_ids = []
         records = defaultdict(list)
-        epoch = self.init_ckpt.get('Epoch', 0)        
+        epoch = self.init_ckpt.get('Epoch', 0)
         train_split = self.config['runner'].get("train_dataloader", "train")
 
         linelogger.info(f'train stage for {self.stage1_steps} steps')
@@ -461,21 +487,21 @@ class Runner():
         
 
         # Log initial tau, switch logits & norm_weight to wandb
-        if is_leader_process():
-            results = {}
-            for i, layer in enumerate(self.upstream.model.module.model.encoder.layers):
-                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
-                    results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
-                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+        # if is_leader_process():
+        #     results = {}
+        #     for i, layer in enumerate(self.upstream.model.module.model.encoder.layers):
+        #         for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+        #             results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
+        #         results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
             
-            for i, weight in enumerate(self.featurizer.model.module.norm_weights):
-                results.update({f"{train_split}_norm_weights_{i}": weight})
+        #     for i, weight in enumerate(self.featurizer.model.module.norm_weights):
+        #         results.update({f"{train_split}_norm_weights_{i}": weight})
 
-            if scheduler:
-                results.update({"lr": scheduler.get_last_lr()[0]})
-            wandb.log(results, step=pbar.n)
+        #     if scheduler:
+        #         results.update({"lr": scheduler.get_last_lr()[0]})
+        #     wandb.log(results, step=pbar.n)
 
-            del results
+        #     del results
         linelogger.info(f"gradient accumulate steps: {self.config['runner'].get('gradient_accumulate_steps')}")
         self.prepare_stage(self.stage)
         try:
@@ -552,11 +578,11 @@ class Runner():
                     optimizer, lr_scheduler, trainable_paras = \
                         (w_optimizer, scheduler, trainable_w_paras) if adapterMode == 'train' else (a_optimizer, None, trainable_a_paras)
                     assert(not (adapterMode != 'train' and self.stage == 2))
-                    
+                    # '''
                     for entry in self.all_entries:
                         if self.args.adapter != False and entry.name == "Upstream":
                             for name, param in entry.model.named_parameters():
-                                if "adapter" in name or 'lora' in name:
+                                if "adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
                                     param.requires_grad = ("switch" in name) ^ (adapterMode == "train")
                                     if param.requires_grad:
                                         # linelogger.info(name)
@@ -569,6 +595,7 @@ class Runner():
                                 param.requires_grad = (self.stage == 1 and self.args.stage1_weighted_sum) \
                                                         or (self.stage == 2 and self.args.stage2_weighted_sum) \
                                                             or (self.args.f_lr and self.stage >= self.args.f_lr_stage)
+                    # '''
                     try:     
                         global_step = pbar.n * (1 + (self.stage == 1)) + (1 + (adapterMode == 'switch')) + delta_step * (self.stage == 2)                  
                         wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in input_modes[adapterMode]['wavs']]
@@ -578,7 +605,8 @@ class Runner():
                         else:
                             with torch.no_grad():
                                 features = self.upstream.model(wavs)
-
+                        # print(torch.equal(features['last_hidden_state'], features['hidden_state_12']))
+                        # print(features['_hidden_states_info'])
                         features = self.featurizer.model(wavs, features)
                         if specaug:
                             features, _ = specaug(features)
@@ -608,6 +636,13 @@ class Runner():
                     if adapterMode == 'train':
                         # Only increment backward_steps in one of the adapterModes
                         backward_steps += 1
+                    else:
+
+                        for layer in self.upstream.model.module.model.encoder.layers:
+                            for name, val in layer.named_parameters():
+                                if 'self_attn' in name and ('bitfit' in name or 'lora' in name) and val.grad is not None:
+                                    # if torch.count_nonzero(val.grad) > 0:
+                                    print(f'{name}: {torch.count_nonzero(val.grad)}')
                     
                     # linelogger.info(f"{backward_steps}, {gradient_accumulate_steps}")
                     if backward_steps % gradient_accumulate_steps > 0:

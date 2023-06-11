@@ -411,7 +411,105 @@ class GLOWCouplingBlock(nn.Module):
 '''
 
 import json
-   
+import loralib as lora
+def quant_noise(module, p, block_size):
+    """
+    Wraps modules and applies quantization noise to the weights for
+    subsequent quantization with Iterative Product Quantization as
+    described in "Training with Quantization Noise for Extreme Model Compression"
+
+    Args:
+        - module: nn.Module
+        - p: amount of Quantization Noise
+        - block_size: size of the blocks for subsequent quantization with iPQ
+
+    Remarks:
+        - Module weights must have the right sizes wrt the block size
+        - Only Linear, Embedding and Conv2d modules are supported for the moment
+        - For more detail on how to quantize by blocks with convolutional weights,
+          see "And the Bit Goes Down: Revisiting the Quantization of Neural Networks"
+        - We implement the simplest form of noise here as stated in the paper
+          which consists in randomly dropping blocks
+    """
+
+    # if no quantization noise, don't register hook
+    if p <= 0:
+        return module
+
+    # supported modules
+    assert isinstance(module, (nn.Linear, nn.Embedding, nn.Conv2d))
+
+    # test whether module.weight has the right sizes wrt block_size
+    is_conv = module.weight.ndim == 4
+
+    # 2D matrix
+    if not is_conv:
+        assert (
+            module.weight.size(1) % block_size == 0
+        ), "Input features must be a multiple of block sizes"
+
+    # 4D matrix
+    else:
+        # 1x1 convolutions
+        if module.kernel_size == (1, 1):
+            assert (
+                module.in_channels % block_size == 0
+            ), "Input channels must be a multiple of block sizes"
+        # regular convolutions
+        else:
+            k = module.kernel_size[0] * module.kernel_size[1]
+            assert k % block_size == 0, "Kernel size must be a multiple of block size"
+
+    def _forward_pre_hook(mod, input):
+        # no noise for evaluation
+        if mod.training:
+            if not is_conv:
+                # gather weight and sizes
+                weight = mod.weight
+                in_features = weight.size(1)
+                out_features = weight.size(0)
+
+                # split weight matrix into blocks and randomly drop selected blocks
+                mask = torch.zeros(
+                    in_features // block_size * out_features, device=weight.device
+                )
+                mask.bernoulli_(p)
+                mask = mask.repeat_interleave(block_size, -1).view(-1, in_features)
+
+            else:
+                # gather weight and sizes
+                weight = mod.weight
+                in_channels = mod.in_channels
+                out_channels = mod.out_channels
+
+                # split weight matrix into blocks and randomly drop selected blocks
+                if mod.kernel_size == (1, 1):
+                    mask = torch.zeros(
+                        int(in_channels // block_size * out_channels),
+                        device=weight.device,
+                    )
+                    mask.bernoulli_(p)
+                    mask = mask.repeat_interleave(block_size, -1).view(-1, in_channels)
+                else:
+                    mask = torch.zeros(
+                        weight.size(0), weight.size(1), device=weight.device
+                    )
+                    mask.bernoulli_(p)
+                    mask = (
+                        mask.unsqueeze(2)
+                        .unsqueeze(3)
+                        .repeat(1, 1, mod.kernel_size[0], mod.kernel_size[1])
+                    )
+
+            # scale weights and apply mask
+            mask = mask.to(
+                torch.bool
+            )  # x.bool() is not currently supported in TorchScript
+            s = 1 / (1 - p)
+            mod.weight.data = s * weight.masked_fill(mask, 0)
+
+    module.register_forward_pre_hook(_forward_pre_hook)
+    return module
 # declaringa a class
 class obj:
       
@@ -688,3 +786,376 @@ class Gumbel:
             #print(y_hard[0], "random")
             y = (y_hard - y).detach() + y
         return y
+    
+class PAdapter(nn.Module):
+    def __init__(self, parentModule: nn.Module) -> None:
+        super().__init__()
+        
+        for name, module in parentModule.named_children():
+            # self.add_module(name, module)
+            pass
+            
+        emb_dim = parentModule.embedding_dim
+        self.adapter = nn.Sequential(
+                    nn.Linear(emb_dim, 32),
+                    nn.GELU(),
+                    nn.Linear(32, emb_dim),
+                )
+        # self.activation_fn = parentModule.activation_fn
+    def forward(self, x, parent, **kwargs):
+        residual = x
+        parallel_input = x
+        self_attn_mask = kwargs['self_attn_mask']
+        self_attn_padding_mask = kwargs['self_attn_padding_mask']
+        need_weights = kwargs['need_weights']
+        att_args = kwargs['att_args']
+        x, attn = parent.self_attn(
+            query=x,
+            key=x,
+            value=x,
+            key_padding_mask=self_attn_padding_mask,
+            need_weights=False,
+        )
+
+        x = parent.dropout1(x)
+        x = residual + x
+
+        x = parent.self_attn_layer_norm(x)
+
+        residual = x
+        x = parent.activation_fn(parent.fc1(x))
+        #
+        x = parent.dropout2(x)
+        x = parent.fc2(x)
+        #
+        houlsby_input = x
+        #
+        layer_result = x
+
+        x = parent.dropout3(x)
+        adapter_output = self.adapter(parallel_input)
+            
+        x = x + adapter_output + residual
+        # return x
+        x = parent.final_layer_norm(x)
+
+        return x, (attn, layer_result)
+
+class SAdapter(nn.Module):
+    def __init__(self, parentModule: nn.Module) -> None:
+        super().__init__()
+        
+        for name, module in parentModule.named_children():
+            pass
+            # self.add_module(name, module)
+            
+        emb_dim = parentModule.embedding_dim
+        self.adapter = nn.Sequential(
+                    nn.Linear(emb_dim, 32),
+                    nn.GELU(),
+                    nn.Linear(32, emb_dim),
+                )
+        # self.activation_fn = parentModule.activation_fn
+    def forward(self, x, parent: nn.Module, **kwargs):
+        residual = x
+        self_attn_mask = kwargs['self_attn_mask']
+        self_attn_padding_mask = kwargs['self_attn_padding_mask']
+        need_weights = kwargs['need_weights']
+        att_args = kwargs['att_args']
+        x, attn = parent.self_attn(
+            query=x,
+            key=x,
+            value=x,
+            key_padding_mask=self_attn_padding_mask,
+            need_weights=False,
+        )
+
+        x = parent.dropout1(x)
+        x = residual + x
+
+        x = parent.self_attn_layer_norm(x)
+
+        residual = x
+        x = parent.activation_fn(parent.fc1(x))
+        #
+        x = parent.dropout2(x)
+        x = parent.fc2(x)
+        #
+        houlsby_input = x
+        #
+        layer_result = x
+
+        x = parent.dropout3(x)
+        adapter_output = self.adapter(houlsby_input)
+            
+        x = x + adapter_output + residual
+        # return x
+        x = parent.final_layer_norm(x)
+
+        return x, (attn, layer_result)
+
+# from s3prl.upstream.wav2vec2.wav2vec2_model import quant_noise
+
+class LoRAAdapter(nn.Module):
+    # Use LoRA for q_proj and v_proj in MuliHeadAttention
+    def __init__(self, parentModule: nn.Module):
+        super().__init__()
+        for name, module in parentModule.named_children():
+            # self.add_module(name, module)
+            pass
+        
+        parent_refs = []
+        for name, module in parentModule.named_parameters():
+            for loraName in ['q_proj', 'v_proj']:
+                if loraName in name:
+                    loraKey = name.split(loraName)[0] + loraName
+                    parent, lastKey, child = find_module(parentModule, loraKey)
+                    outdim, indim  = child.weight.shape
+                    addDict = ({'p': parent, 'k': f"arol_{lastKey}", 'm': quant_noise(lora.Linear(indim, outdim, r=8), parentModule.self_attn.q_noise, parentModule.self_attn.qn_block_size)})
+                    addDict['m'].weight = child.weight
+                    addDict['m'].bias = child.bias
+                    parent_refs.append(addDict)
+        
+        for p in parent_refs:
+            p['p'].add_module(p['k'], p['m']) 
+            # _modules[p['k']] = p['m']
+                        
+    '''
+    def __init__(self, q_indim, q_outdim, v_indim, v_outdim, rank=8):
+        super().__init__()
+        self.q_proj = lora.Linear(q_indim, q_outdim, r=rank)
+        self.v_proj = lora.Linear(v_indim, v_outdim, r=rank)
+    '''
+    def forward(self, x, parent, **kwargs):
+        residual = x
+        self_attn_mask = kwargs['self_attn_mask']
+        self_attn_padding_mask = kwargs['self_attn_padding_mask']
+        need_weights = kwargs['need_weights']
+        att_args = kwargs['att_args']
+        # Start forward
+        residual = x
+        lora_out, lora_attn = parent.self_attn(
+            query=x,
+            key=x,
+            value=x,
+            key_padding_mask=self_attn_padding_mask,
+            need_weights=False,
+            use_lora=True,
+        )
+
+        lora_out = parent.dropout1(lora_out)
+        lora_out = residual + lora_out
+        lora_out = parent.self_attn_layer_norm(lora_out)
+
+        residual = lora_out
+        lora_out = parent.activation_fn(parent.fc1(lora_out))
+        lora_out = parent.dropout2(lora_out)
+
+        lora_out = parent.fc2(lora_out)
+        layer_result = lora_out
+        lora_out = parent.dropout3(lora_out)
+
+        lora_out = lora_out + residual
+        # return lora_out
+        lora_out = parent.final_layer_norm(lora_out)
+
+        return lora_out, (lora_attn, layer_result)
+
+
+class LNFitAdapter(nn.Module):
+    def __init__(self, parentModule):
+        super().__init__()
+        for name, module in parentModule.named_children():
+            pass
+            # self.add_module(name, module)
+        self.lnfit_self_attn_layer_norm = nn.LayerNorm(parentModule.embedding_dim, eps=1e-5, elementwise_affine=True)
+        self.lnfit_final_layer_norm = nn.LayerNorm(parentModule.embedding_dim, eps=1e-5, elementwise_affine=True)
+        # self.activation_fn = parentModule.activation_fn
+    def forward(self, x, parent, **kwargs):
+        self_attn_mask = kwargs['self_attn_mask']
+        self_attn_padding_mask = kwargs['self_attn_padding_mask']
+        need_weights = kwargs['need_weights']
+        att_args = kwargs['att_args']
+        # Start
+        residual = x
+        lnfit_out, lnfit_attn = parent.self_attn(
+            query=x,
+            key=x,
+            value=x,
+            key_padding_mask=self_attn_padding_mask,
+            need_weights=False
+        )
+
+        lnfit_out = parent.dropout1(lnfit_out)
+        lnfit_out = residual + lnfit_out
+        lnfit_out = self.lnfit_self_attn_layer_norm(lnfit_out)
+
+        residual = lnfit_out
+        lnfit_out = parent.activation_fn(parent.fc1(lnfit_out))
+        lnfit_out = parent.dropout2(lnfit_out)
+
+        lnfit_out = parent.fc2(lnfit_out)
+        layer_result = lnfit_out
+        lnfit_out = parent.dropout3(lnfit_out)
+
+        lnfit_out = lnfit_out + residual
+
+        lnfit_out = self.lnfit_final_layer_norm(lnfit_out)
+
+        return lnfit_out, (lnfit_attn, layer_result)
+    
+
+class FuckBit(nn.Module):
+    def __init__(self, init_method="zero"):
+        super().__init__()
+        self.init_method=init_method
+        self.instantiated = False
+        
+    def instantiate(self, hidden_dim):
+        if self.init_method == "zero":
+            self.bias = nn.Parameter(torch.zeros(hidden_dim))
+        else:
+            raise NotImplementedError
+        self.instantiated = True
+    def forward(self, output):
+        if isinstance(output, tuple):
+            hiddens = output[0]
+        elif isinstance(output, torch.Tensor):
+            hiddens = output
+        else:
+            raise TypeError
+        
+        if not self.instantiated:
+            self.hidden_dim = hiddens.shape[-1]
+            # print(f"Got hidden dim hidden_dim {self.hidden_dim}")
+            self.instantiate(hidden_dim=self.hidden_dim)
+
+        modified_output =  hiddens + self.bias
+        
+        if isinstance(output, tuple):
+            output = (modified_output,) + output[1:]
+        elif isinstance(output, torch.Tensor):
+            output = modified_output
+        else:
+            raise TypeError
+        return output
+
+def find_module(root_module: nn.Module, key:str):
+    r"""Find the module using a key and the root module. Return both the parent reference, the child name and reference.
+
+    Args:
+        root_module (:obj:`root_module`): The root_module to find the sub module in
+        key (:obj:`str`): The relative key to the root module.
+
+    Returns:
+        (:obj:`nn.Module`, :obj:`str`, :obj:`nn.Module`):
+        * A reference to the parent module of the target module, mainly for substuting the target module.
+        * The key of the target module relevant to its parent module
+        * Target module.
+    """
+    sub_keys = key.split(".")
+    parent_module = root_module
+    for sub_key in sub_keys[:-1]:
+        parent_module = getattr(parent_module, sub_key)
+    module = getattr(parent_module, sub_keys[-1])
+    return parent_module, sub_keys[-1], module
+
+
+
+class BitFitAdapter(nn.Module):
+    def __init__(self, parentModule: nn.Module):
+        super().__init__()
+        for name, module in parentModule.named_children():
+            pass
+            # self.add_module(name, module)
+        
+        parent_refs = []
+        for name, module in parentModule.named_parameters():
+            if 'bias' in name:
+                parent, lastKey, child = find_module(parentModule, name)
+                parent_refs.append({'p': parent, 'k': f"bitfit_{lastKey}" , 'm': nn.Parameter(torch.zeros_like(child))})
+                # parent.register_parameter(, )
+        
+        for p in parent_refs:
+            # logging.warning(p)
+            p['p'].register_parameter(p['k'], p['m']) 
+
+    def forward(self, x, parent, **kwargs):
+        residual = x
+
+        self_attn_mask = kwargs['self_attn_mask']
+        self_attn_padding_mask = kwargs['self_attn_padding_mask']
+        need_weights = kwargs['need_weights']
+        att_args = kwargs['att_args']
+        # Start forward
+        residual = x
+        bitfit_out, bitfit_attn = parent.self_attn(
+            query=x,
+            key=x,
+            value=x,
+            key_padding_mask=self_attn_padding_mask,
+            need_weights=False,
+            use_bitfit=True,
+        )
+
+        bitfit_out = parent.dropout1(bitfit_out)
+        bitfit_out = residual + bitfit_out
+        bitfit_out = parent.self_attn_layer_norm(bitfit_out) + parent.self_attn_layer_norm.bitfit_bias
+
+        residual = bitfit_out
+        bitfit_out = parent.activation_fn(parent.fc1(bitfit_out) + parent.fc1.bitfit_bias)
+        bitfit_out = parent.dropout2(bitfit_out)
+
+        bitfit_out = parent.fc2(bitfit_out) + parent.fc2.bitfit_bias
+        layer_result = bitfit_out
+        bitfit_out = parent.dropout3(bitfit_out)
+
+        bitfit_out = bitfit_out + residual
+        # return bitfit_out
+        bitfit_out = parent.final_layer_norm(bitfit_out) + parent.final_layer_norm.bitfit_bias
+
+        return bitfit_out, (bitfit_attn, layer_result)
+    
+class Skip(nn.Module):
+    def __init__(self, parentModule: nn.Module):
+        super().__init__()
+        for name, module in parentModule.named_children():
+            pass
+            # self.add_module(name, module)
+        self.activation_fn = parentModule.activation_fn
+        self.layer_result = self.attn = None
+    def forward(self, x, parent, **kwargs):
+        residual = x
+        self_attn_mask = kwargs['self_attn_mask']
+        self_attn_padding_mask = kwargs['self_attn_padding_mask']
+        need_weights = kwargs['need_weights']
+        att_args = kwargs['att_args']
+        # Start forward
+        residual = x
+        skip_out, skip_attn = parent.self_attn(
+            query=x,
+            key=x,
+            value=x,
+            key_padding_mask=self_attn_padding_mask,
+            need_weights=False,
+        )
+
+        skip_out = parent.dropout1(skip_out)
+        skip_out = residual + skip_out
+        skip_out = parent.self_attn_layer_norm(skip_out)
+
+        residual = skip_out
+        skip_out = parent.activation_fn(parent.fc1(skip_out))
+        skip_out = parent.dropout2(skip_out)
+
+        skip_out = parent.fc2(skip_out)
+        layer_result = skip_out
+        self.attn = skip_attn
+        self.layer_result = layer_result
+        skip_out = parent.dropout3(skip_out)
+
+        skip_out = skip_out + residual
+        # return skip_out
+        skip_out = parent.final_layer_norm(skip_out)
+
+        return skip_out, (skip_attn, layer_result)

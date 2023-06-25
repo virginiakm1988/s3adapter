@@ -523,7 +523,9 @@ def dict2obj(dict1):
     # method and custom object hook as arguments
     return json.loads(json.dumps(dict1), object_hook=obj)
 
-def is_baseline(baseline):
+def is_baseline(baseline):        
+    logging.warning(type(baseline))
+
     if(type(baseline) == list):
         assert(len(baseline) == 12)
         return baseline
@@ -585,7 +587,8 @@ class AdapterSwitch(nn.Module):
         self,
         config: object = None,
         initial_logits: List[float] = None,
-        layer_idx: int = None
+        layer_idx: int = None,
+        used_adapter_name: List[str] = None
     ):
         super().__init__()
 
@@ -611,6 +614,7 @@ class AdapterSwitch(nn.Module):
         logger.info(f"paths = {len(initial_logits)}")
         self.prev_mode = None
         self.fixed_idx = len(initial_logits)
+        self.used_adapter = used_adapter_name
         
     @property
     def probs(self):
@@ -626,7 +630,7 @@ class AdapterSwitch(nn.Module):
         if not self.training:
             self.fixed_idx = self.get_arch()
             # self.soft_logits = torch.softmax(self.switch_logits / self.switch_temperature[0], -1)
-            logger.info(f'path index after layer_{self.layer_idx}: {self.fixed_idx}')
+            logger.info(f'current adapter of layer_{self.layer_idx}: {self.used_adapter[self.fixed_idx]}')
         else:
             pass
             # self.fixed_idx = None
@@ -639,20 +643,39 @@ class AdapterSwitch(nn.Module):
         
         self.prev_mode = self.switch_logits.requires_grad
         return self.prev_mode
-            
 
-    '''
-    def eval(self, mode: bool = False):
-        self.training = mode
-        # logger.info(f"eval invoked, mode = {mode}")
-        # self.switch_logits.requires_grad = mode
-        if not mode:
-            self.fixed_idx = torch.argmax(self.switch_logits, dim=-1).item()
-        else:
-            self.fixed_idx = None
-        return super().eval(mode)
-    '''
     def forward(self, x):
+        x = x.transpose(0, 1)
+        batch_size = 1 #x.shape[0]
+        num_classes = (self.switch_logits.shape)[-1]
+        # print('477', self.switch_logits)
+        self.switch_mode()
+        
+        if self.config.strategy == 'global':
+            sample_size = [batch_size, num_classes]
+        else:
+            raise NotImplementedError
+
+        # Sample from Gumbel.
+
+        # self.reduce_tau()
+
+        g = self.gumbel.sample(sample_size).to(self.probs.device)
+
+        # Compute the weights of the convex sum.
+        weights = torch.softmax((g + self.switch_logits) / self.switch_temperature[0], dim=-1)
+        # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
+        
+        if self.hard and (self.switch_logits.requires_grad or not self.config.soft_adapter):
+            y_hard = Gumbel.onehot_from_logits(weights)
+            #print(y_hard[0], "random")
+            weights = (y_hard - weights).detach() + weights
+        
+        # weights = torch.nn.functional.gumbel_softmax(logits=self.switch_logits.expand(sample_size).to(self.probs.device), tau=self.switch_temperature, hard=(self.hard))
+        # Compute the output.
+        return weights[0], torch.argmax(weights[0], dim=-1)
+            
+    def forward_(self, x):
         x = x.transpose(0, 1)
         batch_size, seq_length, num_classes, hidden_dim_size = x.size()
         # print('477', self.switch_logits)
@@ -714,7 +737,7 @@ class AdapterSwitch(nn.Module):
             return
         
         if self.config.tau.type == 'linear':
-            if self.config.baseline:
+            if self.config.baseline or self.config.tau.steps == 0:
                 self.tau_step = 0.0
             else:
                 self.tau_step = (not self.config.baseline) * (self.config.tau.init_value - self.config.tau.stop_value) / self.config.tau.steps
@@ -801,6 +824,7 @@ class PAdapter(nn.Module):
                     nn.GELU(),
                     nn.Linear(32, emb_dim),
                 )
+        self.attn = self.layer_result = None
         # self.activation_fn = parentModule.activation_fn
     def forward(self, x, parent, **kwargs):
         residual = x
@@ -809,7 +833,7 @@ class PAdapter(nn.Module):
         self_attn_padding_mask = kwargs['self_attn_padding_mask']
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
-        x, attn = parent.self_attn(
+        x, self.attn = parent.self_attn(
             query=x,
             key=x,
             value=x,
@@ -830,7 +854,7 @@ class PAdapter(nn.Module):
         #
         houlsby_input = x
         #
-        layer_result = x
+        self.layer_result = x
 
         x = parent.dropout3(x)
         adapter_output = self.adapter(parallel_input)
@@ -839,7 +863,7 @@ class PAdapter(nn.Module):
         # return x
         x = parent.final_layer_norm(x)
 
-        return x, (attn, layer_result)
+        return x, (self.attn, self.layer_result)
 
 class SAdapter(nn.Module):
     def __init__(self, parentModule: nn.Module) -> None:
@@ -855,6 +879,7 @@ class SAdapter(nn.Module):
                     nn.GELU(),
                     nn.Linear(32, emb_dim),
                 )
+        self.attn = self.layer_result = None
         # self.activation_fn = parentModule.activation_fn
     def forward(self, x, parent: nn.Module, **kwargs):
         residual = x
@@ -862,7 +887,7 @@ class SAdapter(nn.Module):
         self_attn_padding_mask = kwargs['self_attn_padding_mask']
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
-        x, attn = parent.self_attn(
+        x, self.attn = parent.self_attn(
             query=x,
             key=x,
             value=x,
@@ -883,7 +908,7 @@ class SAdapter(nn.Module):
         #
         houlsby_input = x
         #
-        layer_result = x
+        self.layer_result = x
 
         x = parent.dropout3(x)
         adapter_output = self.adapter(houlsby_input)
@@ -892,7 +917,7 @@ class SAdapter(nn.Module):
         # return x
         x = parent.final_layer_norm(x)
 
-        return x, (attn, layer_result)
+        return x, (self.attn, self.layer_result)
 
 # from s3prl.upstream.wav2vec2.wav2vec2_model import quant_noise
 
@@ -919,7 +944,8 @@ class LoRAAdapter(nn.Module):
         for p in parent_refs:
             p['p'].add_module(p['k'], p['m']) 
             # _modules[p['k']] = p['m']
-                        
+
+        self.attn = self.layer_result = None                 
     '''
     def __init__(self, q_indim, q_outdim, v_indim, v_outdim, rank=8):
         super().__init__()
@@ -934,7 +960,7 @@ class LoRAAdapter(nn.Module):
         att_args = kwargs['att_args']
         # Start forward
         residual = x
-        lora_out, lora_attn = parent.self_attn(
+        lora_out, self.attn = parent.self_attn(
             query=x,
             key=x,
             value=x,
@@ -952,14 +978,14 @@ class LoRAAdapter(nn.Module):
         lora_out = parent.dropout2(lora_out)
 
         lora_out = parent.fc2(lora_out)
-        layer_result = lora_out
+        self.layer_result = lora_out
         lora_out = parent.dropout3(lora_out)
 
         lora_out = lora_out + residual
         # return lora_out
         lora_out = parent.final_layer_norm(lora_out)
 
-        return lora_out, (lora_attn, layer_result)
+        return lora_out, (self.attn, self.layer_result)
 
 
 class LNFitAdapter(nn.Module):
@@ -970,6 +996,7 @@ class LNFitAdapter(nn.Module):
             # self.add_module(name, module)
         self.lnfit_self_attn_layer_norm = nn.LayerNorm(parentModule.embedding_dim, eps=1e-5, elementwise_affine=True)
         self.lnfit_final_layer_norm = nn.LayerNorm(parentModule.embedding_dim, eps=1e-5, elementwise_affine=True)
+        self.attn = self.layer_result = None
         # self.activation_fn = parentModule.activation_fn
     def forward(self, x, parent, **kwargs):
         self_attn_mask = kwargs['self_attn_mask']
@@ -978,7 +1005,7 @@ class LNFitAdapter(nn.Module):
         att_args = kwargs['att_args']
         # Start
         residual = x
-        lnfit_out, lnfit_attn = parent.self_attn(
+        lnfit_out, self.attn = parent.self_attn(
             query=x,
             key=x,
             value=x,
@@ -995,14 +1022,14 @@ class LNFitAdapter(nn.Module):
         lnfit_out = parent.dropout2(lnfit_out)
 
         lnfit_out = parent.fc2(lnfit_out)
-        layer_result = lnfit_out
+        self.layer_result = lnfit_out
         lnfit_out = parent.dropout3(lnfit_out)
 
         lnfit_out = lnfit_out + residual
 
         lnfit_out = self.lnfit_final_layer_norm(lnfit_out)
 
-        return lnfit_out, (lnfit_attn, layer_result)
+        return lnfit_out, (self.attn, self.layer_result)
     
 
 class FuckBit(nn.Module):
@@ -1071,7 +1098,7 @@ class BitFitAdapter(nn.Module):
         
         parent_refs = []
         for name, module in parentModule.named_parameters():
-            if 'bias' in name:
+            if 'bias' in name and 'lnfit' not in name:
                 parent, lastKey, child = find_module(parentModule, name)
                 parent_refs.append({'p': parent, 'k': f"bitfit_{lastKey}" , 'm': nn.Parameter(torch.zeros_like(child))})
                 # parent.register_parameter(, )
@@ -1080,16 +1107,17 @@ class BitFitAdapter(nn.Module):
             # logging.warning(p)
             p['p'].register_parameter(p['k'], p['m']) 
 
+        self.layer_result = self.attn = None
+
     def forward(self, x, parent, **kwargs):
         residual = x
-
         self_attn_mask = kwargs['self_attn_mask']
         self_attn_padding_mask = kwargs['self_attn_padding_mask']
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
         # Start forward
         residual = x
-        bitfit_out, bitfit_attn = parent.self_attn(
+        bitfit_out, self.attn = parent.self_attn(
             query=x,
             key=x,
             value=x,
@@ -1107,14 +1135,14 @@ class BitFitAdapter(nn.Module):
         bitfit_out = parent.dropout2(bitfit_out)
 
         bitfit_out = parent.fc2(bitfit_out) + parent.fc2.bitfit_bias
-        layer_result = bitfit_out
+        self.layer_result = bitfit_out
         bitfit_out = parent.dropout3(bitfit_out)
 
         bitfit_out = bitfit_out + residual
         # return bitfit_out
         bitfit_out = parent.final_layer_norm(bitfit_out) + parent.final_layer_norm.bitfit_bias
 
-        return bitfit_out, (bitfit_attn, layer_result)
+        return bitfit_out, (self.attn, self.layer_result)
     
 class Skip(nn.Module):
     def __init__(self, parentModule: nn.Module):

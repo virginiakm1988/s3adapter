@@ -1,11 +1,11 @@
 adapter:
   exist: true
-  type: [houlsby, lora]
+  type: ['skip', 'seq', 'para', 'lora', 'lnfit', 'bitfit']
   switch: 
     first: false
     exist: true
     hard: True
-    path: [0, 1, 2, 3]
+    path: [0, 1, 2, 3, 4, 5]
     tau:
       type: linear
       init_value: 5

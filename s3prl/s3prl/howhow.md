@@ -34,11 +34,17 @@ python3 run_downstream.py -m evaluate -e result/downstream/hubert_sd_full/best-s
 ./downstream/diarization/score.sh result/downstream/hubert_sd_fullytrained downstream/diarization/data/test
 
 Note: 
+* This code use 6 path by default. If you want to use a subset of the adpaters, please overide "config.adapter_config.type=['skip', 'seq', 'para', 'lora', 'bitfit', 'lnfit']"
 * -w : train weighted sum
 * --stage2_ckpt: ckpt from stage1, we'll only load switch logits to our Adapter Module
     * this parameter should not exists simultaneously with the --init_ckpt (-i)
 * If using only SINGLE GPU, remember to delete the .module in self.upstream.model.module.model.... #(還是我們用一張的時候也開DDP啊數碼寶貝...)
-* --f_lr: featurizer lr start from stage 2
+* --f_lr: train featurizer lr
+* --f_lr_stage: the stage to start train weighted sum
+* --f_lr_mode: if f_lr_stage=1, please specified which adapterMode (i.e. 'train' or 'switch') to train it.  
 * adapterConfig tau types: ['const', 'linear', 'exp']
+
+
 Override:
---overide "config.runner.gradient_accumulate_steps=2,,config.adapter_config.switch.baseline=2,,config.adapter_config.switch.baseline=[1,1,2,2,2,2,2,2,2,0,0,2]"
+--overide "config.runner.gradient_accumulate_steps=2,,config.adapter_config.switch.baseline=2,,config.adapter_config.switch.baseline=[1,1,2,2,2,2,2,2,2,0,0,2],,config.adapter_config.type=['skip', 'seq', 'para', 'lora', 'bitfit', 'lnfit']"
+

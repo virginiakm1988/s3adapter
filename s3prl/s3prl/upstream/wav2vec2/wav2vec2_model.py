@@ -1093,13 +1093,28 @@ class MultiheadAttention(nn.Module):
                 assert value is not None
                 assert src_len, key_bsz == value.shape[:2]
 
-        v_proj = self.arol_v_proj if use_lora else self.v_proj
-        q_proj = self.arol_q_proj if use_lora else self.q_proj
+        v_proj = self.v_proj
+        q_proj = self.q_proj
         k_proj = self.k_proj
-        q_proj_bias = self.q_proj.bias + (use_bitfit * self.q_proj.bitfit_bias)
-        v_proj_bias = self.v_proj.bias + (use_bitfit * self.v_proj.bitfit_bias)
-        k_proj_bias = self.k_proj.bias + (use_bitfit * self.k_proj.bitfit_bias)
-        out_proj_bias = self.out_proj.bias + (use_bitfit * self.out_proj.bitfit_bias)
+
+        # (use_bitfit * bitfit_bias will cause error when bitfit is not used in the experiment)
+        q_proj_bias = self.q_proj.bias
+        k_proj_bias = self.k_proj.bias
+        v_proj_bias = self.v_proj.bias
+        out_proj_bias = self.out_proj.bias
+        if use_bitfit:
+            q_proj_bias = q_proj_bias + self.q_proj.bitfit_bias
+            v_proj_bias = v_proj_bias + self.v_proj.bitfit_bias
+            k_proj_bias = k_proj_bias + self.k_proj.bitfit_bias
+            out_proj_bias = out_proj_bias + self.out_proj.bitfit_bias
+
+        q_proj_weight = self.q_proj.weight
+        k_proj_weight = self.k_proj.weight
+        v_proj_weight = self.v_proj.weight
+        if use_lora:
+            q_proj_weight = q_proj_weight + ((self.arol_q_proj.lora_B @ self.arol_q_proj.lora_A) * self.arol_q_proj.scaling)
+            v_proj_weight = v_proj_weight + ((self.arol_v_proj.lora_B @ self.arol_v_proj.lora_A) * self.arol_v_proj.scaling)
+            
         if (
             not self.onnx_trace
             and not is_tpu  # don't use PyTorch version on TPUs
@@ -1141,11 +1156,11 @@ class MultiheadAttention(nn.Module):
                     need_weights,
                     attn_mask,
                     use_separate_proj_weight=True,
-                    q_proj_weight=q_proj.weight,
-                    k_proj_weight=k_proj.weight,
-                    v_proj_weight=v_proj.weight,
+                    q_proj_weight=q_proj_weight,
+                    k_proj_weight=k_proj_weight,
+                    v_proj_weight=v_proj_weight,
                 )
-
+        raise NotImplementedError
         if incremental_state is not None:
             saved_state = self._get_input_buffer(incremental_state)
             if saved_state is not None and "prev_key" in saved_state:
@@ -3530,16 +3545,6 @@ class TransformerSentenceEncoderLayer(nn.Module):
         # layer norm associated with the position wise feed-forward NN
         self.final_layer_norm = LayerNorm(self.embedding_dim)
         
-        # Adapters
-        adapterIdx = ['seq', 'skip', 'para', 'lora', 'bitfit', 'lnfit']
-        self.adapterIdx = {e: i for i, e in enumerate(adapterIdx)}
-        deltaModules = ([SAdapter, Skip, PAdapter, LoRAAdapter, BitFitAdapter, LNFitAdapter])
-        self.deltaModules = []
-        for m in deltaModules:
-            self.deltaModules.append(m(self))
-        
-        self.deltaModules = np.array(self.deltaModules)
-        self.deltaList = nn.ModuleList(self.deltaModules)
         # self.use_adapterbias = (adapterConfig.adapter.exist and 'adapterbias' in adapterConfig.adapter.type)
         # self.use_sequential  = (adapterConfig.adapter.exist and 'houlsby' in adapterConfig.adapter.type)
         # self.use_parallel    = (adapterConfig.adapter.exist and 'houlsby' in adapterConfig.adapter.type)
@@ -3583,10 +3588,39 @@ class TransformerSentenceEncoderLayer(nn.Module):
         else:
             print('Original Hubert!!!')
         '''
-        # adapter configs...        
-        self.adapterswitch = AdapterSwitch(config=adapterConfig.adapter.switch, layer_idx=layer_idx)
+        # adapter configs...      
         self.adapterConfig = adapterConfig
-        assert self.adapterIdx['skip'] in self.adapterConfig.adapter.switch.path, "Need skip !"
+        self.used_adapter = self.adapterConfig.adapter.type
+
+        # Override adapteConfig.adapter.switch.path if the number of path is not equal to number of adapter used
+        if len(self.adapterConfig.adapter.switch.path) != len(self.used_adapter):
+            self.adapterConfig.adapter.switch.path = [i for i in range(len(self.used_adapter))]
+            logger.info("Override adapterConfig.adpater.switch.path")
+        logger.info(f"Current used adapters: {self.used_adapter}")
+        logger.info(f"Path index of adapters: {self.adapterConfig.adapter.switch.path}")
+
+        self.adapterswitch = AdapterSwitch(
+            config=self.adapterConfig.adapter.switch, 
+            layer_idx=layer_idx, 
+            used_adapter_name=self.used_adapter
+        )
+        # Adapters
+        self.adapterIdx = {e: i for i, e in enumerate(self.used_adapter)}
+        deltaModules = {
+            'skip': Skip, 
+            'seq': SAdapter, 
+            'para': PAdapter, 
+            'lora': LoRAAdapter, 
+            'lnfit': LNFitAdapter,
+            'bitfit': BitFitAdapter
+        }
+        self.deltaModules = [deltaModules[adapter_name](self) for adapter_name in self.used_adapter]
+        # for m in deltaModules:
+            # self.deltaModules.append(m(self))
+        
+        self.deltaModules = np.array(self.deltaModules)
+        self.deltaList = nn.ModuleList(self.deltaModules)
+        assert self.adapterIdx['skip'] in self.adapterConfig.adapter.switch.path, "Need skip!"
         # self.add_module("switch", AdapterSwitch(num_paths=self.nas_ops))
     def forward(
         self,
@@ -3600,9 +3634,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
         LayerNorm is applied either before or after the self-attention/ffn
         modules similar to the original Transformer imlementation.
         """
-        residual = x
-        adapter_output = parallel_output = None
-        parallel_input = x
+        # residual = x
+        # adapter_output = parallel_output = None
+        # parallel_input = x
         # logging.warning(f"{residual.shape}")
         if self.layer_norm_first:
             raise NotImplementedError("Layer Norm First should be implemented.")
@@ -3654,15 +3688,56 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
                 x = self.adapterswitch(adapterStack)
         else:
-            multiPath = [o(x, self, self_attn_mask=self_attn_mask,
-                self_attn_padding_mask=self_attn_padding_mask,
-                need_weights=need_weights,
-                att_args=att_args) for o in self.deltaModules[self.adapterConfig.adapter.switch.path]]
-            adapterStack = torch.stack([r[0] for r in multiPath], -2)
-            x = self.adapterswitch(adapterStack)
-            # x = self.final_layer_norm(x)
-            attn = self.deltaModules[self.adapterIdx['skip']].attn
-            layer_result = self.deltaModules[self.adapterIdx['skip']].layer_result
+            
+            if self.adapterConfig.adapter.switch.stage == 1:
+                '''
+                multiPath = [
+                    delta(
+                        x, self, 
+                        self_attn_mask=self_attn_mask,
+                        self_attn_padding_mask=self_attn_padding_mask,
+                        need_weights=need_weights,
+                        att_args=att_args
+                    )[0] for delta in self.deltaModules
+                ] # Only take the layer output, instead of all the tuple return by the layer, to reduce memory consumption.
+                
+                adapterStack = torch.stack(multiPath, -2)
+                x = self.adapterswitch.forward_(adapterStack)
+                # x = self.final_layer_norm(x)
+                attn = self.deltaModules[self.adapterIdx['skip']].attn
+                layer_result = self.deltaModules[self.adapterIdx['skip']].layer_result
+                logging.warning(x.shape)
+                del adapterStack, multiPath# Free the memory
+                '''
+                
+                weights, maxIdx = self.adapterswitch(x)
+                res = self.deltaModules[maxIdx](x, 
+                                                self, 
+                                                self_attn_mask=self_attn_mask, 
+                                                self_attn_padding_mask=self_attn_padding_mask, 
+                                                need_weights=need_weights, 
+                                                att_args=att_args
+                                            )
+                x = weights[maxIdx] * \
+                    res[0]
+                
+                # logging.warning(x.shape)
+                attn = res[-1][0]  # self.deltaModules[self.adapterIdx['skip']].attn
+                layer_result = res[-1][1] # self.deltaModules[self.adapterIdx['skip']].layer_result
+
+                # del adapterStack, multiPath# Free the memory
+                
+            else:
+                x, (attn, layer_result) = self.deltaModules[self.adapterswitch.fixed_idx](
+                    x, self, 
+                    self_attn_mask=self_attn_mask, 
+                    self_attn_padding_mask=self_attn_padding_mask, 
+                    need_weights=need_weights, 
+                    att_args=att_args
+                )
+                # attn = self.deltaModules[self.adapterswitch.fixed_idx].attn
+                # layer_result = self.deltaModules[self.adapterswitch.fixed_idx].layer_result
+            
             return x, (attn, layer_result)
             normal_output, lora_output, bitfit_output = self.self_attn(
                 query=x,

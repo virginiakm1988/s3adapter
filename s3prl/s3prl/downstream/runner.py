@@ -15,6 +15,7 @@ import torchaudio
 import numpy as np
 import wandb
 from tqdm import tqdm
+import gc
 from tensorboardX import SummaryWriter
 from torch.utils.data import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -119,10 +120,12 @@ class Runner():
         self.adapterDict = {'adapter': config['adapter_config']}
         self.adapter_config = dict2obj(self.adapterDict)
         self.adapter_config.adapter.switch.baseline = is_baseline(self.adapter_config.adapter.switch.baseline)
+        
         if self.args.mode == 'train':
             # train both stage1 and stage2
             self.stage1_steps = int(self.args.stage1_ratio * self.config['runner']['total_steps'] * (not self.adapter_config.adapter.switch.baseline) // 2)
             self.stage2_steps = self.config['runner']['total_steps'] - self.stage1_steps * 2
+            logging.warning(f"{self.adapter_config.adapter.switch.baseline}, {self.stage1_steps}")
         elif self.args.mode == 'train_stage1':
             self.stage1_steps = self.config['runner']['total_steps']
             self.stage2_steps = 0
@@ -146,11 +149,6 @@ class Runner():
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.steps}, {self.adapter_config.adapter.switch.tau.stop_value}")
         
         self.upstream = self._get_upstream()
-        # with open('model_file.txt', 'w') as f1:
-        #     for name, value in self.upstream.model.named_parameters():
-        #         if "self_attn" in name:
-        #             print(f'{name}: {value}', file=f1)
-        # exit(0)
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
         self.all_entries = [self.upstream, self.featurizer, self.downstream]
@@ -185,22 +183,27 @@ class Runner():
                     model_dict.update(prompt_weight)
                     model.load_state_dict(model_dict)
             if self.args.adapter:
-                upstream_weight = self.init_ckpt.get('Upstream')
-                if upstream_weight:
-                    show(f'[Runner] - Loading {"Adapter"} weights & switch logits from the stage1 experiment')
-                    # init ckpt is given
-                    assert self.stage2_ckpt == {}, \
-                        "init_ckpt and stage2_ckpt shouldn't be provided simultaneously."
-                    
+                adapter_weight = self.init_ckpt.get('adapter')
+                if adapter_weight:
+                    show(f'[Runner] - Loading {"Adapter"} weights & switch logits from the previous experiment')
                     model_dict = model.state_dict()
-                    for para, value in upstream_weight.items():
-                        if 'adapter' in para:
-                            if 'switch' in para and self.adapter_config.adapter.switch.baseline:
-                                continue
-                            model_dict.update({para: value})
-                    # Notice: When using LoRA or LNFit, the initialization weight should be the same as the original pretrained weight.
-                    show(f'[Runner] - Loading {"Adapter"} weights from the previous experiment')
+                    model_dict.update(adapter_weight)
                     model.load_state_dict(model_dict)
+                else:
+                    upstream_weight = self.init_ckpt.get('Upstream')
+                    if upstream_weight:
+                        show(f'[Runner] - Loading {"Adapter"} weights & switch logits from the stage1 experiment')
+                        # init ckpt is given
+                        assert self.stage2_ckpt == {}, \
+                            "init_ckpt and stage2_ckpt shouldn't be provided simultaneously."
+                        
+                        model_dict = model.state_dict()
+                        for para, value in upstream_weight.items():
+                            if any(delta_module in para for delta_module in ['adapter', 'lora', 'lnfit', 'bitfit']):#'adapter' in para:
+                                if 'switch' in para and self.adapter_config.adapter.switch.baseline:
+                                    continue
+                                model_dict.update({para: value})
+                        model.load_state_dict(model_dict)
         elif name == 'Downstream':
             downstream_weight = self.init_ckpt.get('Downstream')
             if downstream_weight:
@@ -261,19 +264,25 @@ class Runner():
             adapterConfig = self.adapter_config,
         ).to(self.args.device)
 
-        # if 'lnfit' in self.adapter_config.adapter.type:
-        for name, _ in model.model.named_parameters():
-            if '_layer_norm' in name and 'lnfit' not in name:
-                parent_key = ".".join(name.split('.')[:-1])
-                parent, _, original_ln = find_module(model.model, parent_key)
-                child_key =["deltaList", f"{parent.adapterIdx['lnfit']}", f"lnfit_{name.split('.')[-2]}"]
-                for key in child_key[:-1]:
-                    parent = getattr(parent, key)
-                setattr(
-                    parent, 
-                    child_key[-1], 
-                    deepcopy(original_ln)
-                )
+        if 'lnfit' in self.adapter_config.adapter.type:
+            for name, _ in model.model.named_parameters():
+                if '_layer_norm' in name and 'lnfit' not in name:
+                    parent_key = ".".join(name.split('.')[:-1])
+                    parent, _, original_ln = find_module(model.model, parent_key)
+                    child_key =["deltaList", f"{parent.adapterIdx['lnfit']}", f"lnfit_{name.split('.')[-2]}"]
+                    for key in child_key[:-1]:
+                        parent = getattr(parent, key)
+                    setattr(
+                        parent, 
+                        child_key[-1], 
+                        deepcopy(original_ln)
+                    )
+                    # Remove bitfit_bias from lnfit's layer_norm
+                    if 'bitfit' in self.adapter_config.adapter.type:
+                        delattr(
+                            getattr(parent, child_key[-1]),
+                            'bitfit_bias'
+                        )
 
         if is_initialized() and get_rank() == 0:
             torch.distributed.barrier()
@@ -365,7 +374,7 @@ class Runner():
         for entry in self.all_entries:
             if self.args.adapter != False and entry.name == "Upstream":
                 for name, param in entry.model.named_parameters():
-                    if "adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
+                    if any(delta_module in name for delta_module in ['adapter', 'lora', 'bitfit', 'lnfit']):#"adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
                         param.requires_grad = True
                     else:
                         param.requires_grad = False
@@ -394,9 +403,6 @@ class Runner():
         trainable_a_paras = []
         # Featurizer paras
         trainable_f_paras = []
-        
-        trainable_a_names  = []
-        trainable_w_names = []
 
         additional_weight = [] # add prompt paras to optimizer
         for entry in self.all_entries:
@@ -414,26 +420,26 @@ class Runner():
 
             #### add adapters ##################
             if self.args.adapter != None and entry.name == "Upstream":
+                adapter_param = 0
                 for name, param in entry.model.named_parameters():
-                    if "adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
+                    if any(delta_module in name for delta_module in ['adapter', 'lora', 'bitfit', 'lnfit']):#"adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
                         param.requires_grad = True
                         if 'switch' in name:
                             trainable_a_paras.append(param)
-                            trainable_a_names.append(name)
                         else:
                             trainable_w_paras.append(param)
-                            trainable_w_names.append(name)
+                            adapter_param += param.nelement() 
                     else:
                         param.requires_grad = False
                     
                 trainable_paras += list(additional_weight)
+                linelogger.info("Numbers of adapter PARAMETER: %.2fM" % (adapter_param/1e6))
             elif entry.name == 'Featurizer' and not self.adapter_config.adapter.switch.baseline and self.args.f_lr:
                 linelogger.info("appending weight to f_optimizer")
                 trainable_f_paras += list(entry.model.parameters())
             elif entry.trainable:
                 linelogger.info(f"append weights: {entry.name}, {len(list(entry.model.parameters()))}")
                 trainable_w_paras += list(entry.model.parameters())
-                trainable_w_names.append(entry.name)
             else:
                 linelogger.info(f'in eval: {entry.name}')
                 entry.model.eval()
@@ -485,23 +491,22 @@ class Runner():
         linelogger.info(f'train stage for {self.stage1_steps} steps')
         adapterModes = ['train', 'switch'] if len(self.adapter_config.adapter.switch.path) > 1 else ['train']            
         
-
         # Log initial tau, switch logits & norm_weight to wandb
-        # if is_leader_process():
-        #     results = {}
-        #     for i, layer in enumerate(self.upstream.model.module.model.encoder.layers):
-        #         for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
-        #             results.update({f"layer_{i}/{train_split}_{j}": logit.item()})
-        #         results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+        if is_leader_process() and self.args.online:
+            results = {}
+            for i, layer in enumerate(self.upstream.model.module.model.encoder.layers):
+                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
+                    results.update({f"layer_{i}/{train_split}_{layer.used_adapter[j]}": logit.item()})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
             
-        #     for i, weight in enumerate(self.featurizer.model.module.norm_weights):
-        #         results.update({f"{train_split}_norm_weights_{i}": weight})
+            for i, weight in enumerate(self.featurizer.model.module.norm_weights):
+                results.update({f"{train_split}_norm_weights_{i}": weight})
 
-        #     if scheduler:
-        #         results.update({"lr": scheduler.get_last_lr()[0]})
-        #     wandb.log(results, step=pbar.n)
+            if scheduler:
+                results.update({"lr": scheduler.get_last_lr()[0]})
+            wandb.log(results, step=pbar.n)
+            del results
 
-        #     del results
         linelogger.info(f"gradient accumulate steps: {self.config['runner'].get('gradient_accumulate_steps')}")
         self.prepare_stage(self.stage)
         try:
@@ -578,7 +583,7 @@ class Runner():
                     optimizer, lr_scheduler, trainable_paras = \
                         (w_optimizer, scheduler, trainable_w_paras) if adapterMode == 'train' else (a_optimizer, None, trainable_a_paras)
                     assert(not (adapterMode != 'train' and self.stage == 2))
-                    # '''
+                    '''
                     for entry in self.all_entries:
                         if self.args.adapter != False and entry.name == "Upstream":
                             for name, param in entry.model.named_parameters():
@@ -595,7 +600,15 @@ class Runner():
                                 param.requires_grad = (self.stage == 1 and self.args.stage1_weighted_sum) \
                                                         or (self.stage == 2 and self.args.stage2_weighted_sum) \
                                                             or (self.args.f_lr and self.stage >= self.args.f_lr_stage)
-                    # '''
+                    '''
+                    if self.stage < 2:
+                        for param in trainable_w_paras:
+                            param.requires_grad = (adapterMode == 'train')
+                        for param in trainable_a_paras:
+                            param.requires_grad = (adapterMode == 'switch')
+                        if f_optimizer and self.stage >= self.args.f_lr_stage:
+                            for param in trainable_f_paras:
+                                param.requires_grad = (adapterMode == self.args.f_lr_mode)
                     try:     
                         global_step = pbar.n * (1 + (self.stage == 1)) + (1 + (adapterMode == 'switch')) + delta_step * (self.stage == 2)                  
                         wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in input_modes[adapterMode]['wavs']]
@@ -607,6 +620,8 @@ class Runner():
                                 features = self.upstream.model(wavs)
                         # print(torch.equal(features['last_hidden_state'], features['hidden_state_12']))
                         # print(features['_hidden_states_info'])
+                        # torch.cuda.empty_cache()
+                        # gc.collect()
                         features = self.featurizer.model(wavs, features)
                         if specaug:
                             features, _ = specaug(features)
@@ -636,13 +651,6 @@ class Runner():
                     if adapterMode == 'train':
                         # Only increment backward_steps in one of the adapterModes
                         backward_steps += 1
-                    else:
-
-                        for layer in self.upstream.model.module.model.encoder.layers:
-                            for name, val in layer.named_parameters():
-                                if 'self_attn' in name and ('bitfit' in name or 'lora' in name) and val.grad is not None:
-                                    # if torch.count_nonzero(val.grad) > 0:
-                                    print(f'{name}: {torch.count_nonzero(val.grad)}')
                     
                     # linelogger.info(f"{backward_steps}, {gradient_accumulate_steps}")
                     if backward_steps % gradient_accumulate_steps > 0:
@@ -657,10 +665,13 @@ class Runner():
                         print(f'[Runner] - grad norm is NaN at step {global_step}, mode {adapterMode}')
                     else:
                         optimizer.step()
+                        # with torch.cuda.device(self.args.device):
+                        
                         if f_optimizer and (self.stage == 2 or (self.args.f_lr_stage == 1 and adapterMode == self.args.f_lr_mode)):
                             # only use f_optimizer if (1) it is not none and (2) at stage 2 or (training with self.args.f_lr_mode at stage 1) 
                             f_optimizer.step()
                             f_optimizer.zero_grad()
+                            
                     optimizer.zero_grad()
                     
                     # adjust learning rate
@@ -724,7 +735,11 @@ class Runner():
 
                 if len(save_names) > 0:
                     all_states = {
-                        'Optimizer': {"w_optimizer": w_optimizer.state_dict(), "a_optimizer": a_optimizer.state_dict()},
+                        'Optimizer': {
+                            "w_optimizer": w_optimizer.state_dict(), 
+                            "a_optimizer": a_optimizer.state_dict(),
+                            "f_optimizer": None if not f_optimizer else f_optimizer.state_dict() # change the order of if-else may cause error
+                        },
                         'Step': global_step,
                         'Epoch': epoch,
                         'Args': self.args,
@@ -744,11 +759,8 @@ class Runner():
                         if self.args.adapter and entry.name == "Upstream": ###
                             adapter_state = {}
                             for name, param in entry.model.named_parameters():
-                                if "adapter" in name:
+                                if any(delta_module in name for delta_module in ['adapter', 'lora', 'bitfit', 'lnfit']):
                                     adapter_state[name] = param
-                                if self.args.adapter == "bitfit":
-                                    if "bias" in name:
-                                        adapter_state[name] = param
                             all_states["adapter"] = adapter_state
 
                     if scheduler:

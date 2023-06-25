@@ -142,6 +142,9 @@ class DownstreamExpert(nn.Module):
 
     # interface
     def log_records(self, mode, records, logger, global_step, **kwargs):
+        wandb.define_metric("dev-acc", summary="max")
+        wandb.define_metric("train-acc", summary="max")
+        
         save_names = []
         results = {} # results update to wandb
         for key in ["acc", "loss"]:
@@ -165,7 +168,7 @@ class DownstreamExpert(nn.Module):
             for i, layer in enumerate(kwargs['layers']):
                 # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
                 for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
-                    results.update({f"layer_{i}/{mode}_{j}": logit.item()})
+                    results.update({f"layer_{i}/{mode}_{layer.used_adapter[j]}": logit.item()})
                 results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
         if 'norm_weights' in kwargs:
             for i, weight in enumerate(kwargs['norm_weights']):

@@ -387,14 +387,13 @@ class DownstreamExpert(nn.Module):
             for i, layer in enumerate(kwargs['layers']):
                 # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
                 for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
-                    results.update({f"layer_{i}/{mode}_{j}": logit.item()})
+                    results.update({f"layer_{i}/{mode}_{layer.used_adapter[j]}": logit.item()})
                 results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
         if 'norm_weights' in kwargs:
             for i, weight in enumerate(kwargs['norm_weights']):
                 results.update({f"{mode}_norm_weights_{i}": weight})
         if 'lr' in kwargs:
             results.update({"lr": kwargs["lr"]})
-
         if 'f_lr' in kwargs:
             results.update({"f_lr": kwargs["f_lr"]})
 

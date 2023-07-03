@@ -22,6 +22,8 @@ python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --a
 SD:
 python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d diarization -m train -f -n hubert_sd_full -uac upstream/adapterConfig.yaml -c downstream/diarization/config.yaml --ngpu ${ngpus} --online -o "config.runner.gradient_accumulate_steps=2,,config.adapter_config.switch.baseline=[0,2,2,2,0,0,0,0,2,0,0,2]"
 
+python -m torch.distributed.launch --nproc_per_node $ngpus run_downstream.py --adapter=houlsby -u hubert -d diarization -m train -f -n $expname -uac upstream/adapterConfig.yaml -c downstream/diarization/config.yaml --ngpu ${ngpus} -o config.runner.gradient_accumulate_steps=2,,config.adapter_config.switch.fix_thres=1.0,,config.adapter_config.switch.tau.init_value=10,,config.adapter_config.switch.tau.stop_value=0.1,,config.adapter_config.switch.tau.type=exp,,config.adapter_config.switch.soft_adapter=True,,config.adapter_config.switch.path=[0,2] --stage1_ratio=0.25 --f_lr --f_lr_stage=1 --f_lr_mode=train --online && python3 run_downstream.py -m evaluate -e result/downstream/${expname}/best-states-dev.ckpt -c downstream/diarization/config.yaml --adapter=houlsby -uac upstream/adapterConfig.yaml -u hubert -d diarization --online -o config.adapter_config.switch.path=[0,2]
+
 If you want to tune featurizer with switch logits, specify **--f_lr_stage=1** when running the code.
 Also, sepcify **--f_lr_mode=train** if you want to train featurizer from stage1 with network weights.
 

@@ -369,7 +369,11 @@ class Runner():
         return self.downstream.model.get_dataloader(mode)
 
     def prepare_stage(self, stage: int):
-        self.upstream.model.module.model.set_stage(stage)
+        if is_initialized():
+            self.upstream.model.module.model.set_stage(stage)
+        else:
+            self.upstream.model.model.set_stage(stage)
+
         # self.upstream.model.model.set_stage(stage)
         for entry in self.all_entries:
             if self.args.adapter != False and entry.name == "Upstream":
@@ -391,7 +395,10 @@ class Runner():
                 linelogger.info(f'train f_lr at stage 1')
                 self.featurizer.model.train()
         elif stage == 2:
-            self.downstream.model.module.adapterConfig.adapter.switch.ratio = 0
+            if is_initialized():
+                self.downstream.model.module.adapterConfig.adapter.switch.ratio = 0
+            else:
+                self.downstream.model.adapterConfig.adapter.switch.ratio = 0
             self.featurizer.model.train()
     @ddprecod
     def train(self):
@@ -493,13 +500,17 @@ class Runner():
         
         # Log initial tau, switch logits & norm_weight to wandb
         if is_leader_process() and self.args.online:
+            if is_initialized():
+                layers, norm_weights = self.upstream.model.module.model.encoder.layers, self.featurizer.model.module.norm_weights.detach()
+            else:
+                layers, norm_weights = self.upstream.model.model.encoder.layers, self.featurizer.model.norm_weights.detach()
             results = {}
-            for i, layer in enumerate(self.upstream.model.module.model.encoder.layers):
+            for i, layer in enumerate(layers):
                 for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
                     results.update({f"layer_{i}/{train_split}_{layer.used_adapter[j]}": logit.item()})
                 results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
             
-            for i, weight in enumerate(self.featurizer.model.module.norm_weights):
+            for i, weight in enumerate(norm_weights):
                 results.update({f"{train_split}_norm_weights_{i}": weight})
 
             if scheduler:
@@ -687,7 +698,10 @@ class Runner():
                     continue
                 
                 if self.stage < 2:
-                    self.upstream.model.module.model.reduce_tau()
+                    if is_initialized():
+                        self.upstream.model.module.model.reduce_tau()
+                    else:
+                        self.upstream.model.model.reduce_tau()
                 
                 pbar.update(1)
                 
@@ -698,6 +712,10 @@ class Runner():
 
                 # logging
                 if global_step % self.config['runner']['log_step'] == 0:
+                    if is_initialized():
+                        layers, norm_weights = self.upstream.model.module.model.encoder.layers, self.featurizer.model.module.norm_weights.detach()
+                    else:
+                        layers, norm_weights = self.upstream.model.model.encoder.layers, self.featurizer.model.norm_weights.detach()
                     self.downstream.model.log_records(
                         train_split,
                         records = records,
@@ -706,8 +724,8 @@ class Runner():
                         batch_ids = batch_ids,
                         total_batch_num = len(dataloaders['train']),
                         adapter_mode = adapterMode,
-                        layers = self.upstream.model.module.model.encoder.layers,  # add module after first model
-                        norm_weights = self.featurizer.model.module.norm_weights.detach(),
+                        layers = layers,  # add module after first model
+                        norm_weights = norm_weights,
                         lr = scheduler.get_last_lr()[0] if scheduler else 0,
                         f_lr = f_scheduler.get_last_lr()[0] if (f_scheduler and self.stage >= self.args.f_lr_stage) else 0,
                         to_wandb = True

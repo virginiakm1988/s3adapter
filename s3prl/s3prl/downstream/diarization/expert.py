@@ -371,6 +371,7 @@ class DownstreamExpert(nn.Module):
 
         average_acc = torch.FloatTensor(records["acc"]).mean().item()
         average_der = torch.FloatTensor(records["der"]).mean().item()
+        average_loss = torch.FloatTensor(records['loss']).mean().item()
 
         logger.add_scalar(
             f"diarization/{mode}-acc", average_acc, global_step=global_step
@@ -378,10 +379,14 @@ class DownstreamExpert(nn.Module):
         logger.add_scalar(
             f"diarization/{mode}-der", average_der, global_step=global_step
         )
-        print("mode {} acc {} der {}".format(mode, average_acc, average_der))
+        logger.add_scalar(
+            f'diarization/{mode}-loss', average_loss, global_step=global_step
+        )
+        print("mode {} acc {} der {} loss {}".format(mode, average_acc, average_der, average_loss))
 
         results.update({f'{mode}-acc': average_acc})
         results.update({f'{mode}-der': average_der})
+        results.update({f'{mode}-loss': average_loss})
 
         if 'layers' in kwargs:
             for i, layer in enumerate(kwargs['layers']):

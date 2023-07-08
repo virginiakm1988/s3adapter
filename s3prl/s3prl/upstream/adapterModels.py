@@ -412,6 +412,7 @@ class GLOWCouplingBlock(nn.Module):
 
 import json
 import loralib as lora
+import torch.nn.functional as F
 def quant_noise(module, p, block_size):
     """
     Wraps modules and applies quantization noise to the weights for
@@ -643,8 +644,32 @@ class AdapterSwitch(nn.Module):
         
         self.prev_mode = self.switch_logits.requires_grad
         return self.prev_mode
+    
+    def aux_loss(self):
+        # Fair-DARTS: zero-one loss = -1/N * sum(sigmoid(alpha) - 0.5)
+        return -F.mse_loss(
+            self.switch_logits, 
+            torch.tensor([1/len(self.switch_logits)] * len(self.switch_logits), requires_grad=False)
+        )
 
     def forward(self, x):
+        # Fair-DARTS version - replace softmax with sigmoid to perform multi-hop optimization
+        x = x.transpose(0, 1)
+        batch_size = 1 #x.shape[0]
+        num_classes = (self.switch_logits.shape)[-1]
+
+        self.switch_mode()
+
+        if self.config.strategy == 'global':
+            sample_size = [batch_size, num_classes]
+        else:
+            raise NotImplementedError
+
+        weights = torch.sigmoid(self.switch_logits, dim=-1)
+
+        return weights[0], torch.argmax(weights[0], dim=-1)
+
+    def forward_onehot(self, x):
         x = x.transpose(0, 1)
         batch_size = 1 #x.shape[0]
         num_classes = (self.switch_logits.shape)[-1]

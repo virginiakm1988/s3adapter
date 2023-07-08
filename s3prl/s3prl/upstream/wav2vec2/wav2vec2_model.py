@@ -3129,6 +3129,11 @@ class Wav2Vec2Model(nn.Module):
         for layer in self.encoder.layers:
             layer.adapterswitch.reduce_tau()
 
+    def aux_loss(self):
+        loss = 0
+        for layer in self.encoder.layers:
+            loss += layer.aux_loss()
+        return loss
 
 class ConvFeatureExtractionModel(nn.Module):
     def __init__(
@@ -3709,7 +3714,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 logging.warning(x.shape)
                 del adapterStack, multiPath# Free the memory
                 '''
-                
+                '''
                 weights, maxIdx = self.adapterswitch(x)
                 res = self.deltaModules[maxIdx](x, 
                                                 self, 
@@ -3724,9 +3729,26 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 # logging.warning(x.shape)
                 attn = res[-1][0]  # self.deltaModules[self.adapterIdx['skip']].attn
                 layer_result = res[-1][1] # self.deltaModules[self.adapterIdx['skip']].layer_result
+                '''
 
-                # del adapterStack, multiPath# Free the memory
+                weights, _ = self.adapterswitch(x)
+                all_x, all_layer_result = [], []
+                for i, delta_module in enumerate(self.deltaModules):
+                    x_, (attn_, layer_result_) = \
+                        delta_module(
+                            x, 
+                            self, 
+                            self_attn_mask=self_attn_mask, 
+                            self_attn_padding_mask=self_attn_padding_mask, 
+                            need_weights=need_weights, 
+                            att_args=att_args
+                        )
+                    all_x.append(x_ * weights[i])
+                    all_layer_result.append(layer_result_ * weights[i])
                 
+                x = torch.stack(all_x, dim=0).sum(dim=0)
+                attn = attn_
+                layer_result = torch.stack(all_layer_result, dim=0).sum(dim=0)
             else:
                 x, (attn, layer_result) = self.deltaModules[self.adapterswitch.fixed_idx](
                     x, self, 
@@ -3735,8 +3757,6 @@ class TransformerSentenceEncoderLayer(nn.Module):
                     need_weights=need_weights, 
                     att_args=att_args
                 )
-                # attn = self.deltaModules[self.adapterswitch.fixed_idx].attn
-                # layer_result = self.deltaModules[self.adapterswitch.fixed_idx].layer_result
             
             return x, (attn, layer_result)
             normal_output, lora_output, bitfit_output = self.self_attn(
@@ -3798,6 +3818,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.final_layer_norm(x)
 
         return x, (attn, layer_result)
+
+    def aux_loss(self):
+        return self.adapterswitch.aux_loss()
 
     def lora_forward(self, input=None, residual=None):
         lora_x, lora_attn = input # lora_attn?

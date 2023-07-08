@@ -641,6 +641,12 @@ class Runner():
                             features, *input_modes[adapterMode]['others'],
                             records = records,
                         )
+                        if adapterMode == 'switch':
+                            if is_initialized():
+                                loss += self.upstream.model.module.model.aux_loss()
+                            else:
+                                loss += self.upstream.model.model.aux_loss()
+                        
                         batch_ids.append(batch_id * (3 - self.stage) + (adapterMode == 'switch'))
 
                         gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')

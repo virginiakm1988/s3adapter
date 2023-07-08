@@ -149,6 +149,7 @@ class Runner():
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.steps}, {self.adapter_config.adapter.switch.tau.stop_value}")
         
         self.upstream = self._get_upstream()
+        print(self.upstream.model)
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
         self.all_entries = [self.upstream, self.featurizer, self.downstream]
@@ -594,24 +595,7 @@ class Runner():
                     optimizer, lr_scheduler, trainable_paras = \
                         (w_optimizer, scheduler, trainable_w_paras) if adapterMode == 'train' else (a_optimizer, None, trainable_a_paras)
                     assert(not (adapterMode != 'train' and self.stage == 2))
-                    '''
-                    for entry in self.all_entries:
-                        if self.args.adapter != False and entry.name == "Upstream":
-                            for name, param in entry.model.named_parameters():
-                                if "adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
-                                    param.requires_grad = ("switch" in name) ^ (adapterMode == "train")
-                                    if param.requires_grad:
-                                        # linelogger.info(name)
-                                        input_modes[adapterMode]['add_weight'].append(param)
-                                    # print("Adapter!!", name, param.requires_grad)
-                                else:
-                                    param.requires_grad = False
-                        if entry.name == "Featurizer":
-                            for name, param in entry.model.named_parameters():
-                                param.requires_grad = (self.stage == 1 and self.args.stage1_weighted_sum) \
-                                                        or (self.stage == 2 and self.args.stage2_weighted_sum) \
-                                                            or (self.args.f_lr and self.stage >= self.args.f_lr_stage)
-                    '''
+
                     if self.stage < 2:
                         for param in trainable_w_paras:
                             param.requires_grad = (adapterMode == 'train')
@@ -629,10 +613,7 @@ class Runner():
                         else:
                             with torch.no_grad():
                                 features = self.upstream.model(wavs)
-                        # print(torch.equal(features['last_hidden_state'], features['hidden_state_12']))
-                        # print(features['_hidden_states_info'])
-                        # torch.cuda.empty_cache()
-                        # gc.collect()
+
                         features = self.featurizer.model(wavs, features)
                         if specaug:
                             features, _ = specaug(features)

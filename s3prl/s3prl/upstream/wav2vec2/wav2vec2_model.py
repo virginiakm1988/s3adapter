@@ -3625,7 +3625,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         
         self.deltaModules = np.array(self.deltaModules)
         self.deltaList = nn.ModuleList(self.deltaModules)
-        assert self.adapterIdx['skip'] in self.adapterConfig.adapter.switch.path, "Need skip!"
+        # assert self.adapterIdx['skip'] in self.adapterConfig.adapter.switch.path, "Need skip!"
         # self.add_module("switch", AdapterSwitch(num_paths=self.nas_ops))
     def forward(
         self,

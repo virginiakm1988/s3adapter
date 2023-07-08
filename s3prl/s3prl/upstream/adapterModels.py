@@ -611,12 +611,16 @@ class AdapterSwitch(nn.Module):
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.FloatTensor(initial_logits))
                 )
+        self.register_parameter(
+                    'initial_logits', nn.Parameter(torch.FloatTensor(initial_logits))
+                )
+        self.initial_logits.requires_grad = False
         # self.soft_logits = self.probs()
         logger.info(f"paths = {len(initial_logits)}")
         self.prev_mode = None
         self.fixed_idx = len(initial_logits)
         self.used_adapter = used_adapter_name
-        
+
     @property
     def probs(self):
         return torch.softmax(self.switch_logits / self.switch_temperature[0], dim=-1)
@@ -635,6 +639,7 @@ class AdapterSwitch(nn.Module):
         else:
             pass
             # self.fixed_idx = None
+        self.initial_logits.to(self.switch_logits.device)
         return super().train(mode)
 
     def switch_mode(self):
@@ -646,28 +651,25 @@ class AdapterSwitch(nn.Module):
         return self.prev_mode
     
     def aux_loss(self):
-        # Fair-DARTS: zero-one loss = -1/N * sum(sigmoid(alpha) - 0.5)
-        return -F.mse_loss(
-            self.switch_logits, 
-            torch.tensor([1/len(self.switch_logits)] * len(self.switch_logits), requires_grad=False)
-        )
+        # Fair-DARTS: zero-one loss = -1/N * sum(sigmoid(alpha) - 0.5) * scaling_factor
+        return -F.mse_loss(self.switch_logits, self.initial_logits) * self.config.aux_loss_ratio
 
     def forward(self, x):
         # Fair-DARTS version - replace softmax with sigmoid to perform multi-hop optimization
-        x = x.transpose(0, 1)
-        batch_size = 1 #x.shape[0]
-        num_classes = (self.switch_logits.shape)[-1]
+        # x = x.transpose(0, 1)
+        # batch_size = 1 #x.shape[0]
+        # num_classes = (self.switch_logits.shape)[-1]
 
         self.switch_mode()
 
-        if self.config.strategy == 'global':
-            sample_size = [batch_size, num_classes]
-        else:
-            raise NotImplementedError
+        # if self.config.strategy == 'global':
+        #     sample_size = [batch_size, num_classes]
+        # else:
+        #     raise NotImplementedError
 
-        weights = torch.sigmoid(self.switch_logits, dim=-1)
+        weights = torch.sigmoid(self.switch_logits)
 
-        return weights[0], torch.argmax(weights[0], dim=-1)
+        return weights, torch.argmax(weights, dim=-1)
 
     def forward_onehot(self, x):
         x = x.transpose(0, 1)

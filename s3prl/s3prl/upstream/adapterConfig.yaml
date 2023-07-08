@@ -16,6 +16,7 @@ adapter:
     baseline: -1
     fix_thres: 0.8
     soft_adapter: False
+    aux_loss_ratio: 10
 
   houlsby:
     input: false

@@ -613,6 +613,12 @@ class HubertModel(torch.nn.Module):
         for layer in self.encoder.layers:
             layer.adapterswitch.reduce_tau()
     
+    def aux_loss(self):
+        loss = 0
+        for layer in self.encoder.layers:
+            loss += layer.aux_loss()
+        return loss
+
     def set_stage(self, stage: int):
         assert stage == 1 or stage == 2, "stage most be 1 or 2"
         for layer in self.encoder.layers:

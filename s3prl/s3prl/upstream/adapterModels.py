@@ -684,7 +684,8 @@ class AdapterSwitch(nn.Module):
         weights = torch.softmax((g + self.switch_logits) / self.switch_temperature[0], dim=-1)
         # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
         
-        if (self.switch_logits.requires_grad and not self.config.soft_switch) or not self.config.soft_train:
+        if (self.switch_logits.requires_grad and not self.config.soft_switch) or \
+            (not self.switch_logits.requires_grad and not self.config.soft_train):
             y_hard = Gumbel.onehot_from_logits(weights)
             #print(y_hard[0], "random")
             weights = (y_hard - weights).detach() + weights

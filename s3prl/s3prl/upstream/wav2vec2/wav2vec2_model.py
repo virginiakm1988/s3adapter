@@ -3732,7 +3732,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 '''
 
                 weights, maxIdx = self.adapterswitch(x)
-                if self.adapterConfig.adapter.switch.soft_train or \
+                if (not self.adapterswitch.switch_logits.requires_grad and self.adapterConfig.adapter.switch.soft_train) or \
                     (self.adapterswitch.switch_logits.requires_grad and self.adapterConfig.adapter.switch.soft_switch):
                     # Linear combination of all path's output with their corresponding weights
                     all_x, all_layer_result = [], []

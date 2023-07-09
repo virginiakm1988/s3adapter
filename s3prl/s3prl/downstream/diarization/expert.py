@@ -101,7 +101,7 @@ class DownstreamExpert(nn.Module):
         self.register_buffer("best_score", torch.zeros(1))
 
     # Interface
-    def get_dataloader(self, mode, switch_ratio=0.5):
+    def get_dataloader(self, mode):
         """
         Args:
             mode: string
@@ -123,6 +123,7 @@ class DownstreamExpert(nn.Module):
             )
             # split the training set into two parts
             if mode == "train":
+                switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1)
                 train_dataset, switch_dataset = torch.utils.data.random_split(dataset, [1 - switch_ratio, switch_ratio])
                 dataset = {
                     "original": dataset,
@@ -162,7 +163,7 @@ class DownstreamExpert(nn.Module):
             pin_memory=True,
             collate_fn=dataset["original"].collate_fn,
         )
-        switch_dataloader = DataLoader(
+        switch_dataloader = None if len(dataset["switch"]) == 0 else DataLoader(
             dataset["switch"],
             batch_size=self.train_batch_size,
             shuffle=(switch_sampler is None),

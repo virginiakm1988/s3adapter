@@ -38,10 +38,8 @@ class DownstreamExpert(nn.Module):
         self.get_dataset()
 
         
-        full_train_dataset = FluentCommandsDataset(self.train_df, self.base_path, self.Sy_intent)
+        self.full_train_dataset = FluentCommandsDataset(self.train_df, self.base_path, self.Sy_intent)
         # self.switch_train_dataset = FluentCommandsDataset(self.switch_train_df, self.base_path, self.Sy_intent)
-        self.train_dataset, self.switch_train_dataset = \
-            torch.utils.data.random_split(full_train_dataset, [1 - switch_ratio, switch_ratio])
         self.dev_dataset = FluentCommandsDataset(self.valid_df, self.base_path, self.Sy_intent)
         self.test_dataset = FluentCommandsDataset(self.test_df, self.base_path, self.Sy_intent)
 
@@ -83,6 +81,9 @@ class DownstreamExpert(nn.Module):
         self.test_df = test_df
 
     def _get_train_dataloader(self, dataset):
+        if len(dataset) == 0:
+            return None
+        
         sampler = DistributedSampler(dataset) if is_initialized() else None
         return DataLoader(
             dataset, batch_size=self.datarc['train_batch_size'],
@@ -113,6 +114,9 @@ class DownstreamExpert(nn.Module):
     # Interface
     def get_dataloader(self, mode, epoch=None, **kwargs):
         if mode == 'train':
+            switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1)
+            self.train_dataset, self.switch_train_dataset = \
+                torch.utils.data.random_split(self.full_train_dataset, [1 - switch_ratio, switch_ratio])
             return {'train': eval(f'self.get_train_dataloader')(),
                     'switch': eval(f'self.get_switch_dataloader')()}
         else:

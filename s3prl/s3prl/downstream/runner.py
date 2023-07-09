@@ -371,7 +371,7 @@ class Runner():
         return self.downstream.model.get_dataloader(mode)
 
     def prepare_stage(self, stage: int):
-        if isinstance(self.upstream.model):
+        if isinstance(self.upstream.model, DDP):
             self.upstream.model.module.model.set_stage(stage)
         else:
             self.upstream.model.model.set_stage(stage)
@@ -490,7 +490,6 @@ class Runner():
         if is_leader_process():
             logger = SummaryWriter(self.args.expdir)
 
-        backward_steps = 0
         delta_step = 0
         batch_ids = []
         records = defaultdict(list)
@@ -535,8 +534,7 @@ class Runner():
                     raise
             else:
                 raise
-        
-        indices = {}
+
         for adapterMode in adapterModes:
             if dataloaders[adapterMode]:
                 linelogger.info(f'dataset size of {adapterMode}: {len(dataloaders[adapterMode].dataset)}')
@@ -554,7 +552,6 @@ class Runner():
             
         self.stage_steps_prefix = [self.stage1_steps, self.config['runner']['total_steps']]
         gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
-        sentinel = (object(), object) # To check if iterator reach EOF
 
         while pbar.n < self.config['runner']['total_steps']:
             if self.stage == 1 and pbar.n >= self.stage_steps_prefix[self.stage - 1]:
@@ -562,6 +559,8 @@ class Runner():
                 self.stage = 2
                 adapterModes = ['train']
                 delta_step = self.stage1_steps * 2 - pbar.n 
+                inner_pbar.close()
+                linelogger.info("to stage2!")
                 try:
                     dataloaders = self.downstream.model.get_dataloader(train_split, epoch=epoch['train'])
                 except TypeError as e:
@@ -576,9 +575,14 @@ class Runner():
                             raise
                     else:
                         raise
-            
-            batch_id = 0
-            inner_pbar = tqdm(len(dataloaders['train']), dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
+                for adapterMode in adapterModes:
+                    if dataloaders[adapterMode]:
+                        linelogger.info(f'dataset size of {adapterMode}: {len(dataloaders[adapterMode].dataset)}')
+                        linelogger.info(f'data loader size of {adapterMode}: {len(dataloaders[adapterMode])}')
+                        linelogger.info(f'dataset # indice of {adapterMode}: {len(dataloaders[adapterMode].dataset.indices)}')
+
+            batch_id = -1 # set to -1 so that the first batch's batch_id will be zero.
+            inner_pbar = tqdm(total=len(dataloaders['train']), dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
             while pbar.n < self.stage_steps_prefix[self.stage - 1]:
                 for adapterMode in adapterModes:
                     assert(not (adapterMode == 'switch' and self.stage == 2))
@@ -612,7 +616,7 @@ class Runner():
                             # Reopen the pbar
                             if adapterMode == 'train':
                                 inner_pbar.close()
-                                inner_pbar = tqdm(len(dataloaders['train']), dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
+                                inner_pbar = tqdm(total=len(dataloaders['train']), dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
 
                             iters[adapterMode] = iter(dataloaders[adapterMode])
                             (wavs, *others) = next(iters[adapterMode])
@@ -637,7 +641,7 @@ class Runner():
                                 features, *input_modes[adapterMode]['others'],
                                 records = records,
                             )
-                            # Fair-DARTS
+                            # Fair-DARTS loss
                             if adapterMode == 'switch' and self.adapter_config.adapter.switch.fair_darts:
                                 if isinstance(self.upstream.model, DDP):
                                     loss += self.upstream.model.module.model.aux_loss() * self.adapter_config.adapter.switch.aux_loss_ratio
@@ -1006,6 +1010,7 @@ class Runner():
             '''
                     
         pbar.close()
+        inner_pbar.close()
 
         if self.args.push_to_hf_hub:
             self.push_to_huggingface_hub()

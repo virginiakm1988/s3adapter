@@ -667,7 +667,7 @@ class AdapterSwitch(nn.Module):
         # Fair-DARTS version - replace softmax with sigmoid to perform multi-hop optimization
         if self.config.fair_darts:
             weights = torch.sigmoid(self.switch_logits)
-            return weights, torch.argmax(weights, dim=-1)
+            return weights.unsqueeze(0), torch.argmax(weights, dim=-1)
 
         x = x.transpose(0, 1)
         batch_size = 1 #x.shape[0]
@@ -691,9 +691,9 @@ class AdapterSwitch(nn.Module):
         
         # weights = torch.nn.functional.gumbel_softmax(logits=self.switch_logits.expand(sample_size).to(self.probs.device), tau=self.switch_temperature, hard=(self.hard))
         # Compute the output.
-        return weights[0], torch.argmax(weights[0], dim=-1)
+        return weights, torch.argmax(weights[0], dim=-1)
 
-    def forward_onehot(self, x):
+    def forward_at_branch_lora(self, x):
         x = x.transpose(0, 1)
         batch_size = 1 #x.shape[0]
         num_classes = (self.switch_logits.shape)[-1]

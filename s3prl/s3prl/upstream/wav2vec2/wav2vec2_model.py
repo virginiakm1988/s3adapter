@@ -3732,8 +3732,8 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 '''
 
                 weights, maxIdx = self.adapterswitch(x)
-                if self.adapter_config.adapter.switch.soft_train or \
-                    (self.adapterswitch.switch_logits.requires_grad and self.adapter_config.adapter.switch.soft_switch):
+                if self.adapterConfig.adapter.switch.soft_train or \
+                    (self.adapterswitch.switch_logits.requires_grad and self.adapterConfig.adapter.switch.soft_switch):
                     # Linear combination of all path's output with their corresponding weights
                     all_x, all_layer_result = [], []
                     for i, delta_module in enumerate(self.deltaModules):
@@ -3753,18 +3753,15 @@ class TransformerSentenceEncoderLayer(nn.Module):
                     layer_result = torch.stack(all_layer_result, dim=-2)
                     del all_x, all_layer_result
 
-                    if self.adapter_config.adapter.switch.strategy == 'global':
+                    if self.adapterConfig.adapter.switch.strategy == 'global':
                         x = torch.einsum('ijkl,ik->ijl', x, weights)
                         layer_result = torch.einsum('ijkl,ik->ijl', layer_result, weights)
-                    elif self.adapter_config.adapter.switch.strategy == 'seq_length':
+                    elif self.adapterConfig.adapter.switch.strategy == 'seq_length':
                         x = torch.einsum('ijkl,ijk->ijl', x, weights)
                         layer_result = torch.einsum('ijkl,ijk->ijl', layer_result, weights)
                     else:
                         x = torch.einsum('ijkl,ijlk->ijl', x, weights)
                         layer_result = torch.einsum('ijkl,ijlk->ijl', layer_result, weights)
-                    
-                    x = x.transpose(0, 1)
-                    layer_result = layer_result.transpose(0, 1)
                 else:
                     # One-Hot
                     res = \
@@ -3776,7 +3773,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                             need_weights=need_weights, 
                             att_args=att_args
                         )
-                    x = weights[maxIdx] * res[0]
+                    x = weights[0][maxIdx] * res[0]
                     
                     # logging.warning(x.shape)
                     attn = res[-1][0]  # self.deltaModules[self.adapterIdx['skip']].attn

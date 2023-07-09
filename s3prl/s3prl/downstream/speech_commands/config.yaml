@@ -1,7 +1,7 @@
 runner:
   total_steps: 200000
   gradient_clipping: 1
-  gradient_accumulate_steps: 2
+  gradient_accumulate_steps: 1
 
   log_step: 100 #100
   eval_step: 5000 #5000
@@ -24,10 +24,10 @@ scheduler:
 
 downstream_expert:
   datarc:
-    speech_commands_root: /tmp2/b08902126/data/speech_commands_v0.01
-    speech_commands_test_root: /tmp2/b08902126/data/speech_commands_test_set_v0.01
+    speech_commands_root: /work/u2752721/speech_commands_v0.01
+    speech_commands_test_root: /work/u2752721/speech_commands_test_set_v0.01
     num_workers: 8
-    batch_size: 16
+    batch_size: 32
 
   modelrc:
     projector_dim: 256

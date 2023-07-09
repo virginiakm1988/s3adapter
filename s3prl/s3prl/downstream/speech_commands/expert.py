@@ -39,10 +39,8 @@ class DownstreamExpert(nn.Module):
 
         train_list, valid_list = split_dataset(self.datarc["speech_commands_root"])
         num_paths = len(self.adapterConfig.adapter.switch.path)
-        print('export 35', num_paths)
-        switch_ratio = self.adapterConfig.adapter.switch.ratio
-        full_train_dataset = SpeechCommandsDataset(train_list, **self.datarc)
-        self.train_dataset, self.switch_train_dataset = torch.utils.data.random_split(full_train_dataset, [1 - switch_ratio, switch_ratio])
+        self.full_train_dataset = SpeechCommandsDataset(train_list, **self.datarc)
+        # self.train_dataset, self.switch_train_dataset = torch.utils.data.random_split(full_train_dataset, [1 - switch_ratio, switch_ratio])
         # self.switch_train_dataset = SpeechCommandsDataset(train_list['eval'], **self.datarc)
         self.dev_dataset = SpeechCommandsDataset(valid_list, **self.datarc)
         self.test_dataset = SpeechCommandsTestingDataset(**self.datarc)
@@ -52,7 +50,7 @@ class DownstreamExpert(nn.Module):
         self.projector = nn.Linear(upstream_dim, self.modelrc['projector_dim'])
         self.model = model_cls(
             input_dim = self.modelrc['projector_dim'],
-            output_dim = full_train_dataset.class_num,
+            output_dim = self.full_train_dataset.class_num,
             **model_conf,
         )
 
@@ -61,10 +59,13 @@ class DownstreamExpert(nn.Module):
         self.register_buffer('best_score', torch.zeros(1))
 
     def _get_balanced_train_dataloader(self, dataset: torch.utils.data.Subset, drop_last=False):
-        if is_initialized():
-            sampler = DistributedSamplerWrapper(dataset)
+        if len(dataset) == 0:
+            return None
+        
         sample_weights = [dataset.dataset.sample_weights[i] for i in dataset.indices]
-        sampler = WeightedRandomSampler(sample_weights, len(dataset.dataset.sample_weights))
+        sampler = WeightedRandomSampler(sample_weights, len(sample_weights))
+        if is_initialized():
+            sampler = DistributedSamplerWrapper(sampler)
         return DataLoader(
             dataset,
             sampler=sampler,
@@ -99,6 +100,8 @@ class DownstreamExpert(nn.Module):
     # Interface
     def get_dataloader(self, mode, epoch=None, **kwargs):
         if mode == 'train':
+            switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1)
+            self.train_dataset, self.switch_train_dataset = torch.utils.data.random_split(self.full_train_dataset, [1 - switch_ratio, switch_ratio])  
             return {'train': self._get_balanced_train_dataloader(self.train_dataset, drop_last=True),
                     'switch': self._get_balanced_train_dataloader(self.switch_train_dataset, drop_last=True)}
         elif mode == 'dev':
@@ -142,8 +145,7 @@ class DownstreamExpert(nn.Module):
             for i, layer in enumerate(kwargs['layers']):
                 # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
                 for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
-                    results.update({f"layer_{i}/{key_prefix}_{j}": logit.item()})
-                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
+                    results.update({f"layer_{i}/{mode}_{layer.used_adapter[j]}": logit.item()})
         if 'norm_weights' in kwargs:
             for i, weight in enumerate(kwargs['norm_weights']):
                 results.update({f"{key_prefix}_norm_weights_{i}": weight})

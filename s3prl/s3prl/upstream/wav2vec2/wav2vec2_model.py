@@ -3731,24 +3731,56 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 layer_result = res[-1][1] # self.deltaModules[self.adapterIdx['skip']].layer_result
                 '''
 
-                weights, _ = self.adapterswitch(x)
-                all_x, all_layer_result = [], []
-                for i, delta_module in enumerate(self.deltaModules):
-                    x_, (attn_, layer_result_) = \
-                        delta_module(
-                            x, 
+                weights, maxIdx = self.adapterswitch(x)
+                if self.adapter_config.adapter.switch.soft_train or \
+                    (self.adapterswitch.switch_logits.requires_grad and self.adapter_config.adapter.switch.soft_switch):
+                    # Linear combination of all path's output with their corresponding weights
+                    all_x, all_layer_result = [], []
+                    for i, delta_module in enumerate(self.deltaModules):
+                        x_, (attn, layer_result_) = \
+                            delta_module(
+                                x,
+                                self,
+                                self_attn_mask=self_attn_mask,
+                                self_attn_padding_mask=self_attn_padding_mask,
+                                need_weights=need_weights,
+                                att_args=att_args
+                            )
+                        all_x.append(x_)
+                        all_layer_result.append(layer_result_)
+                    
+                    x = torch.stack(all_x, dim=-2)
+                    layer_result = torch.stack(all_layer_result, dim=-2)
+                    del all_x, all_layer_result
+
+                    if self.adapter_config.adapter.switch.strategy == 'global':
+                        x = torch.einsum('ijkl,ik->ijl', x, weights)
+                        layer_result = torch.einsum('ijkl,ik->ijl', layer_result, weights)
+                    elif self.adapter_config.adapter.switch.strategy == 'seq_length':
+                        x = torch.einsum('ijkl,ijk->ijl', x, weights)
+                        layer_result = torch.einsum('ijkl,ijk->ijl', layer_result, weights)
+                    else:
+                        x = torch.einsum('ijkl,ijlk->ijl', x, weights)
+                        layer_result = torch.einsum('ijkl,ijlk->ijl', layer_result, weights)
+                    
+                    x = x.transpose(0, 1)
+                    layer_result = layer_result.transpose(0, 1)
+                else:
+                    # One-Hot
+                    res = \
+                        self.deltaModules[maxIdx](
+                            x,  
                             self, 
                             self_attn_mask=self_attn_mask, 
                             self_attn_padding_mask=self_attn_padding_mask, 
                             need_weights=need_weights, 
                             att_args=att_args
                         )
-                    all_x.append(x_ * weights[i])
-                    all_layer_result.append(layer_result_ * weights[i])
-                
-                x = torch.stack(all_x, dim=0).sum(dim=0)
-                attn = attn_
-                layer_result = torch.stack(all_layer_result, dim=0).sum(dim=0)
+                    x = weights[maxIdx] * res[0]
+                    
+                    # logging.warning(x.shape)
+                    attn = res[-1][0]  # self.deltaModules[self.adapterIdx['skip']].attn
+                    layer_result = res[-1][1] # self.deltaModules[self.adapterIdx['skip']].layer_result
             else:
                 x, (attn, layer_result) = self.deltaModules[self.adapterswitch.fixed_idx](
                     x, self, 

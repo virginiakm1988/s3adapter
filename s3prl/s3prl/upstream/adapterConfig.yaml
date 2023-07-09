@@ -4,7 +4,7 @@ adapter:
   switch: 
     first: false
     exist: true
-    hard: True
+    # hard: True
     path: [0, 1, 2, 3, 4, 5]
     tau:
       type: linear
@@ -15,7 +15,10 @@ adapter:
     # freq: 0.1  # 0~1
     baseline: -1
     fix_thres: 0.8
-    soft_adapter: False
+    # soft_adapter: False
+    soft_train: False   # Set to True if you don't want to use one-hot when training weight
+    soft_switch: False  # Set to True if you don't want to use one-hot when training switch
+    fair_darts: False   # Set to Ture if you want to use Fair-DARTS, should accompany with soft_train = soft_switch = True
     aux_loss_ratio: 10
 
   houlsby:

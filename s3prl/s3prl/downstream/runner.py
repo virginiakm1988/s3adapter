@@ -9,6 +9,7 @@ import tempfile
 import importlib
 from pathlib import Path
 from copy import deepcopy
+from itertools import zip_longest, islice
 
 import torch
 import torchaudio
@@ -370,7 +371,7 @@ class Runner():
         return self.downstream.model.get_dataloader(mode)
 
     def prepare_stage(self, stage: int):
-        if is_initialized():
+        if isinstance(self.upstream.model):
             self.upstream.model.module.model.set_stage(stage)
         else:
             self.upstream.model.model.set_stage(stage)
@@ -396,7 +397,7 @@ class Runner():
                 linelogger.info(f'train f_lr at stage 1')
                 self.featurizer.model.train()
         elif stage == 2:
-            if is_initialized():
+            if isinstance(self.downstream.model, DDP):
                 self.downstream.model.module.adapterConfig.adapter.switch.ratio = 0
             else:
                 self.downstream.model.adapterConfig.adapter.switch.ratio = 0
@@ -493,7 +494,7 @@ class Runner():
         delta_step = 0
         batch_ids = []
         records = defaultdict(list)
-        epoch = self.init_ckpt.get('Epoch', 0)
+        epoch = self.init_ckpt.get('Epoch', {'train': 0, 'switch': 0})
         train_split = self.config['runner'].get("train_dataloader", "train")
 
         linelogger.info(f'train stage for {self.stage1_steps} steps')
@@ -501,7 +502,7 @@ class Runner():
         
         # Log initial tau, switch logits & norm_weight to wandb
         if is_leader_process() and self.args.online:
-            if is_initialized():
+            if isinstance(self.upstream.model, DDP):
                 layers, norm_weights = self.upstream.model.module.model.encoder.layers, self.featurizer.model.module.norm_weights.detach()
             else:
                 layers, norm_weights = self.upstream.model.model.encoder.layers, self.featurizer.model.norm_weights.detach()
@@ -552,26 +553,246 @@ class Runner():
                 iters[adapterMode] = iter(dataloaders[adapterMode])
             
         self.stage_steps_prefix = [self.stage1_steps, self.config['runner']['total_steps']]
+        gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
+        sentinel = (object(), object) # To check if iterator reach EOF
 
         while pbar.n < self.config['runner']['total_steps']:
             if self.stage == 1 and pbar.n >= self.stage_steps_prefix[self.stage - 1]:
                 self.prepare_stage(2)
                 self.stage = 2
+                adapterModes = ['train']
                 delta_step = self.stage1_steps * 2 - pbar.n 
                 try:
-                    dataloaders = self.downstream.model.get_dataloader(train_split, epoch=epoch)
+                    dataloaders = self.downstream.model.get_dataloader(train_split, epoch=epoch['train'])
                 except TypeError as e:
                     if "unexpected keyword argument 'epoch'" in str(e):
                         try:
                             dataloaders = self.downstream.model.get_dataloader(train_split)
                             for adapterMode in adapterModes:
                                 if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
-                                    dataloaders[adapterMode].sampler.set_epoch(epoch)
+                                    dataloaders[adapterMode].sampler.set_epoch(epoch[adapterMode])
+                                iters[adapterMode] = iter(dataloaders[adapterMode])
                         except:
                             raise
                     else:
                         raise
+            
+            batch_id = 0
+            inner_pbar = tqdm(len(dataloaders['train']), dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
+            while pbar.n < self.stage_steps_prefix[self.stage - 1]:
+                for adapterMode in adapterModes:
+                    assert(not (adapterMode == 'switch' and self.stage == 2))
 
+                    optimizer, lr_scheduler, trainable_paras = \
+                        (w_optimizer, scheduler, trainable_w_paras) if adapterMode == 'train' else (a_optimizer, None, trainable_a_paras)
+                    if trainable_f_paras and self.stage >= self.args.f_lr_stage and adapterMode == self.args.f_lr_mode:
+                        trainable_paras = trainable_paras + trainable_f_paras
+                    
+                    if self.stage < 2:
+                        for param in trainable_w_paras:
+                            param.requires_grad = (adapterMode == 'train')
+                        for param in trainable_a_paras:
+                            param.requires_grad = (adapterMode == 'switch')
+                        if f_optimizer and self.stage >= self.args.f_lr_stage:
+                            for param in trainable_f_paras:
+                                param.requires_grad = (adapterMode == self.args.f_lr_mode)
+                    
+                    for _ in range(gradient_accumulate_steps):
+                        try:
+                            (wavs, *others) = next(iters[adapterMode])
+                            if adapterMode == 'train':
+                                batch_id += 1
+                        except StopIteration:
+                            if adapterMode == 'train':
+                                batch_id = 0
+                            epoch[adapterMode] += 1
+                            if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
+                                dataloaders[adapterMode].sampler.set_epoch(epoch[adapterMode])
+                            
+                            # Reopen the pbar
+                            if adapterMode == 'train':
+                                inner_pbar.close()
+                                inner_pbar = tqdm(len(dataloaders['train']), dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
+
+                            iters[adapterMode] = iter(dataloaders[adapterMode])
+                            (wavs, *others) = next(iters[adapterMode])
+                        
+                        # Input Data
+                        input_modes[adapterMode] = {'wavs': wavs, 'others': others, 'add_weight': []}
+                        try:     
+                            global_step = pbar.n * (1 + (self.stage == 1)) + (1 + (adapterMode == 'switch')) + delta_step * (self.stage == 2)         
+                            wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in input_modes[adapterMode]['wavs']]
+                            # Forward
+                            if self.upstream.trainable:
+                                features = self.upstream.model(wavs)
+                            else:
+                                with torch.no_grad():
+                                    features = self.upstream.model(wavs)
+
+                            features = self.featurizer.model(wavs, features)
+                            if specaug:
+                                features, _ = specaug(features)
+                            loss = self.downstream.model(
+                                train_split,
+                                features, *input_modes[adapterMode]['others'],
+                                records = records,
+                            )
+                            # Fair-DARTS
+                            if adapterMode == 'switch' and self.adapter_config.adapter.switch.fair_darts:
+                                if isinstance(self.upstream.model, DDP):
+                                    loss += self.upstream.model.module.model.aux_loss() * self.adapter_config.adapter.switch.aux_loss_ratio
+                                else:
+                                    loss += self.upstream.model.model.aux_loss() * self.adapter_config.adapter.switch.aux_loss_ratio
+                            
+                            batch_ids.append(batch_id * (3 - self.stage) + (adapterMode == 'switch'))
+
+                            (loss / gradient_accumulate_steps).backward()
+                            del loss, wavs, others, features
+
+                        except RuntimeError as e:
+                            if 'CUDA out of memory' in str(e):
+                                print(f'[Runner] - CUDA out of memory at step {global_step}, mode {adapterMode}')
+                                if is_initialized():
+                                    raise
+                                with torch.cuda.device(self.args.device):
+                                    torch.cuda.empty_cache()
+                                optimizer.zero_grad()
+                                continue
+                            else:
+                                raise
+                        
+                        if adapterMode == 'train':
+                            inner_pbar.update(1)
+                    
+                    # gradient clipping
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        trainable_paras, self.config['runner']['gradient_clipping'])
+
+                    # optimize
+                    if math.isnan(grad_norm):
+                        print(f'[Runner] - grad norm is NaN at step {global_step}, mode {adapterMode}')
+                    else:
+                        optimizer.step()
+                        if f_optimizer and (self.stage == 2 or (self.args.f_lr_stage == 1 and adapterMode == self.args.f_lr_mode)):
+                            # only use f_optimizer if (1) it is not none and (2) at stage 2 or (training with self.args.f_lr_mode at stage 1) 
+                            f_optimizer.step()
+                            f_optimizer.zero_grad()
+                            
+                    optimizer.zero_grad()
+                    
+                    # adjust learning rate
+                    if lr_scheduler:
+                        lr_scheduler.step()
+
+                    if f_scheduler and (self.stage == 2 or (self.args.f_lr_stage == 1 and adapterMode == self.args.f_lr_mode)):
+                        f_scheduler.step()
+
+                if self.stage < 2:
+                    if isinstance(self.upstream.model, DDP):
+                        self.upstream.model.module.model.reduce_tau()
+                    else:
+                        self.upstream.model.model.reduce_tau()
+                
+                pbar.update(1)
+                
+                if not is_leader_process():
+                    batch_ids = []
+                    records = defaultdict(list)
+                    continue
+
+                # logging
+                if global_step % self.config['runner']['log_step'] == 0:
+                    if isinstance(self.upstream.model, DDP):
+                        layers, norm_weights = self.upstream.model.module.model.encoder.layers, self.featurizer.model.module.norm_weights.detach()
+                    else:
+                        layers, norm_weights = self.upstream.model.model.encoder.layers, self.featurizer.model.norm_weights.detach()
+                    self.downstream.model.log_records(
+                        train_split,
+                        records = records,
+                        logger = logger,
+                        global_step = global_step,
+                        batch_ids = batch_ids,
+                        total_batch_num = len(dataloaders['train']),
+                        adapter_mode = adapterMode,
+                        layers = layers,  # add module after first model
+                        norm_weights = norm_weights,
+                        lr = scheduler.get_last_lr()[0] if scheduler else 0,
+                        f_lr = f_scheduler.get_last_lr()[0] if (f_scheduler and self.stage >= self.args.f_lr_stage) else 0,
+                        to_wandb = self.args.online
+                    )
+                    batch_ids = []
+                    records = defaultdict(list)
+
+                # evaluation and save checkpoint
+                save_names = []
+
+                if global_step % self.config['runner']['eval_step'] == 0:
+                    for split in self.config['runner']['eval_dataloaders']:
+                        save_names += self.evaluate(split, logger, global_step)
+
+                if global_step % self.config['runner']['save_step'] == 0:
+                    def check_ckpt_num(directory):
+                        max_keep = self.config['runner']['max_keep']
+                        ckpt_pths = glob.glob(f'{directory}/states-*.ckpt')
+                        if len(ckpt_pths) >= max_keep:
+                            ckpt_pths = sorted(ckpt_pths, key=lambda pth: int(pth.split('-')[-1].split('.')[0]))
+                            for ckpt_pth in ckpt_pths[:len(ckpt_pths) - max_keep + 1]:
+                                os.remove(ckpt_pth)
+                    check_ckpt_num(self.args.expdir)
+                    save_names.append(f'states-{global_step}.ckpt')
+
+                if len(save_names) > 0:
+                    all_states = {
+                        'Optimizer': {
+                            "w_optimizer": w_optimizer.state_dict(), 
+                            "a_optimizer": a_optimizer.state_dict(),
+                            "f_optimizer": None if not f_optimizer else f_optimizer.state_dict() # change the order of if-else may cause error
+                        },
+                        'Step': global_step,
+                        'Epoch': epoch,
+                        'Args': self.args,
+                        'Config': self.config,
+                    }
+
+                    for entry in self.all_entries:
+                        if entry.trainable:
+                            all_states[entry.name] = get_model_state(entry.model)
+
+                        if (self.args.prompt[0] == "prefix" or self.args.prompt[0] == "preinput") and entry.name == "Upstream":
+                            prompt_state = {}
+                            for name, param in entry.model.named_parameters():
+                                if "prompt" in name:
+                                    prompt_state[name] = param
+                            all_states["prompt"] = prompt_state
+                        
+                        if self.args.adapter and entry.name == "Upstream":
+                            if isinstance(entry.model, DDP):
+                                named_paras = entry.model.module.named_parameters()
+                            else:
+                                named_paras = entry.model.named_parameters()
+                            adapter_state = {}
+                            for name, param in named_paras:
+                                if any(delta_module in name for delta_module in ['adapter', 'lora', 'bitfit', 'lnfit']):
+                                    adapter_state[name] = param
+                            all_states["adapter"] = adapter_state
+
+                    if scheduler:
+                        all_states['Scheduler'] = scheduler.state_dict()
+
+                    if f_scheduler:
+                        all_states['f_scheduler'] = f_scheduler.state_dict()
+
+                    if is_initialized():
+                        all_states['WorldSize'] = get_world_size()
+
+                    save_paths = [os.path.join(self.args.expdir, name) for name in save_names]
+                    tqdm.write(f'[Runner] - Save the checkpoint to:')
+                    for i, path in enumerate(save_paths):
+                        tqdm.write(f'{i + 1}. {path}')
+                        torch.save(all_states, path)
+                    del all_states
+
+            '''
             linelogger.info(f'dataset size of train: {len(dataloaders["train"].dataset)}, {pbar.n}')            
             for batch_id, (wavs, *others) in enumerate(tqdm(dataloaders['train'], dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)):
                 if pbar.n >= self.stage_steps_prefix[self.stage - 1]:
@@ -782,13 +1003,8 @@ class Runner():
                     for i, path in enumerate(save_paths):
                         tqdm.write(f'{i + 1}. {path}')
                         torch.save(all_states, path)
-                
-            epoch += 1
-            
-            for adapterMode in adapterModes:
-                if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
-                            dataloaders[adapterMode].sampler.set_epoch(epoch)
-            
+            '''
+                    
         pbar.close()
 
         if self.args.push_to_hf_hub:

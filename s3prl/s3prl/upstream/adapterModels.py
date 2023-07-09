@@ -595,11 +595,14 @@ class AdapterSwitch(nn.Module):
 
         self.config = config
 
+        if self.config.fair_darts:
+            assert self.config.soft_train and self.config.soft_switch, "Fair DARTS should use linear combination!"
+
         # Keep the logits of probabilities as a separate parameters.
         
         self.tau_setup()
         self.switch_temperature = ([self.config.tau.init_value - self.tau_step * self.config.tau.init_steps])
-        self.hard = self.config.hard
+        # self.hard = self.config.hard
         # Distribution used.
         self.gumbel = torch.distributions.Gumbel(0, 1)
         self.training = True
@@ -611,10 +614,11 @@ class AdapterSwitch(nn.Module):
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.FloatTensor(initial_logits))
                 )
-        self.register_parameter(
-                    'initial_logits', nn.Parameter(torch.FloatTensor(initial_logits))
-                )
-        self.initial_logits.requires_grad = False
+        if self.config.fair_darts:
+            self.register_parameter(
+                        'initial_logits', nn.Parameter(torch.FloatTensor(initial_logits))
+                    )
+            self.initial_logits.requires_grad = False
         # self.soft_logits = self.probs()
         logger.info(f"paths = {len(initial_logits)}")
         self.prev_mode = None
@@ -639,7 +643,8 @@ class AdapterSwitch(nn.Module):
         else:
             pass
             # self.fixed_idx = None
-        self.initial_logits.to(self.switch_logits.device)
+        if self.config.fair_darts:
+            self.initial_logits.to(self.switch_logits.device)
         return super().train(mode)
 
     def switch_mode(self):
@@ -652,24 +657,41 @@ class AdapterSwitch(nn.Module):
     
     def aux_loss(self):
         # Fair-DARTS: zero-one loss = -1/N * sum(sigmoid(alpha) - 0.5) * scaling_factor
-        return -F.mse_loss(self.switch_logits, self.initial_logits) * self.config.aux_loss_ratio
+        if not self.config.fair_darts:
+            return 0
+        return -F.mse_loss(self.switch_logits, self.initial_logits)
 
     def forward(self, x):
-        # Fair-DARTS version - replace softmax with sigmoid to perform multi-hop optimization
-        # x = x.transpose(0, 1)
-        # batch_size = 1 #x.shape[0]
-        # num_classes = (self.switch_logits.shape)[-1]
-
         self.switch_mode()
 
-        # if self.config.strategy == 'global':
-        #     sample_size = [batch_size, num_classes]
-        # else:
-        #     raise NotImplementedError
+        # Fair-DARTS version - replace softmax with sigmoid to perform multi-hop optimization
+        if self.config.fair_darts:
+            weights = torch.sigmoid(self.switch_logits)
+            return weights, torch.argmax(weights, dim=-1)
 
-        weights = torch.sigmoid(self.switch_logits)
+        x = x.transpose(0, 1)
+        batch_size = 1 #x.shape[0]
+        num_classes = (self.switch_logits.shape)[-1]
 
-        return weights, torch.argmax(weights, dim=-1)
+        if self.config.strategy == 'global':
+            sample_size = [batch_size, num_classes]
+        else:
+            raise NotImplementedError
+
+        g = self.gumbel.sample(sample_size).to(self.probs.device)
+
+        # Compute the weights of the convex sum.
+        weights = torch.softmax((g + self.switch_logits) / self.switch_temperature[0], dim=-1)
+        # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
+        
+        if (self.switch_logits.requires_grad and not self.config.soft_switch) or not self.config.soft_train:
+            y_hard = Gumbel.onehot_from_logits(weights)
+            #print(y_hard[0], "random")
+            weights = (y_hard - weights).detach() + weights
+        
+        # weights = torch.nn.functional.gumbel_softmax(logits=self.switch_logits.expand(sample_size).to(self.probs.device), tau=self.switch_temperature, hard=(self.hard))
+        # Compute the output.
+        return weights[0], torch.argmax(weights[0], dim=-1)
 
     def forward_onehot(self, x):
         x = x.transpose(0, 1)
@@ -750,6 +772,7 @@ class AdapterSwitch(nn.Module):
         # logger.info(f"{y[0]}\n{y.shape}\n{weights}")
         # print('458', x.shape, y.shape, y.transpose(0, 1).shape)
         return y.transpose(0, 1)
+    
     def reduce_tau(self):
         # tau_before = self.switch_temperature[0]
         if self.config.tau.type == 'linear':

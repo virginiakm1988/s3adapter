@@ -3694,7 +3694,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 x = self.adapterswitch(adapterStack)
         else:
             
-            if self.adapterConfig.adapter.switch.stage == 1:
+            if self.adapterConfig.adapter.switch.stage == 1 and self.adapterswitch.training:
                 '''
                 multiPath = [
                     delta(

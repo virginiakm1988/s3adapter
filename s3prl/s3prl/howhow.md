@@ -9,7 +9,7 @@ python run_downstream.py --adapter=houlsby -u hubert -d ctc -m train -f -n huber
 
 ** create new container
 sudo apt update && sudo apt install tmux -y
-sudo ln -s /lib/x86_64-linux-gnu/libtic.so.6.2 /lib/x86_64-linux-gnu/libtinfow.so.6
+sudo ln -s /lib/x86_64-linux-gnu/libtic.so.6.3 /lib/x86_64-linux-gnu/libtinfow.so.6
 tmux
 conda activate s3adapter
 

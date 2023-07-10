@@ -150,7 +150,6 @@ class Runner():
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.steps}, {self.adapter_config.adapter.switch.tau.stop_value}")
         
         self.upstream = self._get_upstream()
-        print(self.upstream.model)
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
         self.all_entries = [self.upstream, self.featurizer, self.downstream]
@@ -529,7 +528,7 @@ class Runner():
                     dataloaders = self.downstream.model.get_dataloader(train_split)
                     for adapterMode in adapterModes:
                         if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
-                            dataloaders[adapterMode].sampler.set_epoch(epoch)
+                            dataloaders[adapterMode].sampler.set_epoch(epoch[adapterMode])
                 except:
                     raise
             else:
@@ -1045,7 +1044,7 @@ class Runner():
             entry.model.eval()
 
         # prepare data
-        dataloader = self.downstream.model.get_dataloader(split, self.args.mode)
+        dataloader = self.downstream.model.get_dataloader(split)
         evaluate_ratio = float(self.config["runner"].get("evaluate_ratio", 1))
         evaluate_steps = round(len(dataloader) * evaluate_ratio)
 

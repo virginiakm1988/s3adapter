@@ -384,6 +384,20 @@ class DownstreamExpert(nn.Module):
             f'diarization/{mode}-loss', average_loss, global_step=global_step
         )
         print("mode {} acc {} der {} loss {}".format(mode, average_acc, average_der, average_loss))
+        if mode == 'train': 
+            average_aux_loss = torch.FloatTensor(records['aux_loss']).mean().item() if len(records['aux_loss']) > 0 else 0
+            logger.add_scalar(
+                f'diarization/{mode}-aux_loss', average_aux_loss, global_step=global_step
+            )
+            results.update({f'{mode}-aux_loss': average_aux_loss})
+            #print(f'aux_loss {average_aux_loss}')
+
+            total_loss = average_loss + average_aux_loss
+            logger.add_scalar(
+                f'diarization/{mode}-total_loss', total_loss, global_step=global_step
+            )
+            results.update({f'{mode}-total_loss': total_loss})
+            print(f'mode {mode} normal_loss {average_loss} aux_loss {average_aux_loss} total_loss {total_loss}')
 
         results.update({f'{mode}-acc': average_acc})
         results.update({f'{mode}-der': average_der})

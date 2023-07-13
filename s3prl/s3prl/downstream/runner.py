@@ -431,12 +431,12 @@ class Runner():
                 adapter_param = 0
                 for name, param in entry.model.named_parameters():
                     if any(delta_module in name for delta_module in ['adapter', 'lora', 'bitfit', 'lnfit']):#"adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
-                        param.requires_grad = True
                         if 'switch' in name:
                             trainable_a_paras.append(param)
                         else:
                             trainable_w_paras.append(param)
                             adapter_param += param.nelement() 
+                        param.requires_grad = True
                     else:
                         param.requires_grad = False
                     
@@ -496,7 +496,7 @@ class Runner():
         train_split = self.config['runner'].get("train_dataloader", "train")
 
         linelogger.info(f'train stage for {self.stage1_steps} steps')
-        adapterModes = ['train', 'switch'] if len(self.adapter_config.adapter.switch.path) > 1 else ['train']            
+        adapterModes = ['train', 'switch'] if len(self.adapter_config.adapter.switch.path) > 1 and not self.adapter_config.adapter.switch.baseline else ['train'] 
         
         # Log initial tau, switch logits & norm_weight to wandb
         if is_leader_process() and self.args.online:
@@ -579,7 +579,6 @@ class Runner():
                         linelogger.info(f'dataset size of {adapterMode}: {len(dataloaders[adapterMode].dataset)}')
                         linelogger.info(f'data loader size of {adapterMode}: {len(dataloaders[adapterMode])}')
                         linelogger.info(f'dataset # indice of {adapterMode}: {len(dataloaders[adapterMode].dataset.indices)}')
-
             batch_id = -1 # set to -1 so that the first batch's batch_id will be zero.
             inner_pbar = tqdm(total=len(dataloaders['train']), dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
             while pbar.n < self.stage_steps_prefix[self.stage - 1]:
@@ -643,9 +642,11 @@ class Runner():
                             # Fair-DARTS loss
                             if adapterMode == 'switch' and self.adapter_config.adapter.switch.fair_darts:
                                 if isinstance(self.upstream.model, DDP):
-                                    loss += self.upstream.model.module.model.aux_loss() * self.adapter_config.adapter.switch.aux_loss_ratio
+                                    aux_loss = self.upstream.model.module.model.aux_loss() * self.adapter_config.adapter.switch.aux_loss_ratio
                                 else:
-                                    loss += self.upstream.model.model.aux_loss() * self.adapter_config.adapter.switch.aux_loss_ratio
+                                    aux_loss = self.upstream.model.model.aux_loss() * self.adapter_config.adapter.switch.aux_loss_ratio
+                                loss += aux_loss
+                                records['aux_loss'].append(aux_loss.detach().item())
                             
                             batch_ids.append(batch_id * (3 - self.stage) + (adapterMode == 'switch'))
 

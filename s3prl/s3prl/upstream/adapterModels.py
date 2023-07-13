@@ -596,6 +596,7 @@ class AdapterSwitch(nn.Module):
         self.config = config
 
         if self.config.fair_darts:
+            logger.info('use Fair-DARTS')
             assert self.config.soft_train and self.config.soft_switch, "Fair DARTS should use linear combination!"
 
         # Keep the logits of probabilities as a separate parameters.
@@ -608,17 +609,19 @@ class AdapterSwitch(nn.Module):
         self.training = True
         self.paths = self.config.path
         self.layer_idx = layer_idx
-        initial_logits = ([1. / len(self.paths)] * len(self.paths) if not (self.config.baseline) 
+
+        if not self.config.fair_darts:
+            initial_logits = ([1. / len(self.paths)] * len(self.paths) if not (self.config.baseline) 
                             else [int(i == self.config.baseline[layer_idx]) for i in range(len(self.paths))])
-        print(initial_logits)
+        else:
+            initial_logits = [0. for _ in range(len(self.paths))]
+
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.FloatTensor(initial_logits))
                 )
+        logger.info(f'initial_logits: {torch.sigmoid(self.switch_logits) if self.config.fair_darts else self.switch_logits}')
         if self.config.fair_darts:
-            self.register_parameter(
-                        'initial_logits', nn.Parameter(torch.FloatTensor(initial_logits))
-                    )
-            self.initial_logits.requires_grad = False
+            self.initial_logits = torch.sigmoid(torch.FloatTensor(initial_logits))
         # self.soft_logits = self.probs()
         logger.info(f"paths = {len(initial_logits)}")
         self.prev_mode = None
@@ -627,7 +630,10 @@ class AdapterSwitch(nn.Module):
 
     @property
     def probs(self):
-        return torch.softmax(self.switch_logits / self.switch_temperature[0], dim=-1)
+        if not self.config.fair_darts:
+            return torch.softmax(self.switch_logits / self.switch_temperature[0], dim=-1)
+        # Fair-DARTS: Multi-Hop weights
+        return torch.sigmoid(self.switch_logits)
 
     def get_arch(self):
         return torch.argmax(self.switch_logits, dim=-1).item()
@@ -644,7 +650,7 @@ class AdapterSwitch(nn.Module):
             pass
             # self.fixed_idx = None
         if self.config.fair_darts:
-            self.initial_logits.to(self.switch_logits.device)
+            self.initial_logits = self.initial_logits.to(self.switch_logits.device)
         return super().train(mode)
 
     def switch_mode(self):
@@ -659,7 +665,7 @@ class AdapterSwitch(nn.Module):
         # Fair-DARTS: zero-one loss = -1/N * sum(sigmoid(alpha) - 0.5) * scaling_factor
         if not self.config.fair_darts:
             return 0
-        return -F.mse_loss(self.switch_logits, self.initial_logits)
+        return -F.mse_loss(torch.sigmoid(self.switch_logits), self.initial_logits)
 
     def forward(self, x):
         self.switch_mode()

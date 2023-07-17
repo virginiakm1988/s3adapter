@@ -95,6 +95,11 @@ class DownstreamExpert(nn.Module):
             output_class_num=self.datarc["num_speakers"],
             **self.modelrc,
         )
+        self.virtual_model = Model(
+            input_dim=self.upstream_dim,
+            output_class_num=self.datarc["num_speakers"],
+            **self.modelrc,
+        )
         self.objective = pit_loss
 
         self.logging = os.path.join(expdir, "log.log")
@@ -148,6 +153,19 @@ class DownstreamExpert(nn.Module):
         where wav1, wav2 ... are in variable length
         each wav is torch.FloatTensor in cpu with dim()==1 and sample_rate==16000
     """
+
+    def copy_params(self):
+        # Store
+        self.virtual_model.load_state_dict(self.model.state_dict())
+        return [self.virtual_model.parameters()]
+
+    def use_virtual(self):
+        para_list = self.copy_params()
+        self.curr_model = self.virtual_model
+        return para_list
+        
+    def use_default(self):
+        self.curr_model = self.model
 
     def _get_train_dataloader(self, dataset):
         train_sampler = DistributedSampler(dataset["train"]) if is_initialized() else None
@@ -275,7 +293,7 @@ class DownstreamExpert(nn.Module):
             features.device
         )
         features, labels = self._match_length(features, labels)
-        predicted = self.model(features)
+        predicted = self.curr_model(features)
 
         # cause logits are in (batch, seq, class) and labels are in (batch, seq)
         # nn.CrossEntropyLoss expect to have (N, class) and (N,) as input

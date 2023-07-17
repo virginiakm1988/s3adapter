@@ -180,6 +180,9 @@ class Featurizer(nn.Module):
             self.weights = nn.Parameter(torch.zeros(self.layer_num))
             self.norm_weights = torch.zeros(self.layer_num)
             feature = self._weighted_sum([f.cpu() for f in feature])
+            # To store the old weights during replacement
+            self.virtual_weights = None
+            self.curr_weights = self.weights
         else:
             feature = feature.cpu()
 
@@ -213,6 +216,18 @@ class Featurizer(nn.Module):
             feature = feature[self.layer_selection]
 
         return feature
+    
+    def copy_params(self):
+        self.virtual_weights = self.weights.clone()
+        return [self.virtual_weights.parameters()]
+
+    def use_virtual(self):
+        para_list = self.copy_params()
+        self.curr_weights = self.virtual_weights
+        return para_list
+
+    def use_default(self):
+        self.curr_weights = self.weights
 
     def _weighted_sum(self, feature):
         '''
@@ -248,10 +263,10 @@ class Featurizer(nn.Module):
         
         if self.layer_num == len(feature):
             stacked_feature = stacked_feature.view(self.layer_num, -1)
-            self.norm_weights = F.softmax(self.weights, dim=-1)
+            self.norm_weights = F.softmax(self.curr_weights, dim=-1)
         else:
             stacked_feature = stacked_feature.view(depth , -1)
-            self.norm_weights = F.softmax(self.weights[:depth], dim=-1)
+            self.norm_weights = F.softmax(self.curr_weights[:depth], dim=-1)
         # print(f'norm_weight: {self.norm_weights}')
         weighted_feature = (self.norm_weights.unsqueeze(-1) * stacked_feature).sum(dim=0)
         weighted_feature = weighted_feature.view(*origin_shape)

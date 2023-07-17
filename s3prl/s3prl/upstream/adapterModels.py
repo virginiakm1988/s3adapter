@@ -622,11 +622,12 @@ class AdapterSwitch(nn.Module):
         logger.info(f'initial_logits: {torch.sigmoid(self.switch_logits) if self.config.fair_darts else self.switch_logits}')
         if self.config.fair_darts:
             self.initial_logits = torch.sigmoid(torch.FloatTensor(initial_logits))
-        # self.soft_logits = self.probs()
+
         logger.info(f"paths = {len(initial_logits)}")
         self.prev_mode = None
         self.fixed_idx = len(initial_logits)
         self.used_adapter = used_adapter_name
+        self.gumbel_noise = None
 
     @property
     def probs(self):
@@ -667,37 +668,35 @@ class AdapterSwitch(nn.Module):
             return 0
         return -F.mse_loss(torch.sigmoid(self.switch_logits), self.initial_logits)
 
-    def forward(self, x):
-        self.switch_mode()
-
-        # Fair-DARTS version - replace softmax with sigmoid to perform multi-hop optimization
-        if self.config.fair_darts:
-            weights = torch.sigmoid(self.switch_logits)
-            return weights.unsqueeze(0), torch.argmax(weights, dim=-1)
-
-        x = x.transpose(0, 1)
-        batch_size = 1 #x.shape[0]
+    def sample_gumble(self):
+        batch_size = 1
         num_classes = (self.switch_logits.shape)[-1]
 
         if self.config.strategy == 'global':
             sample_size = [batch_size, num_classes]
         else:
             raise NotImplementedError
-
-        g = self.gumbel.sample(sample_size).to(self.probs.device)
-
-        # Compute the weights of the convex sum.
-        weights = torch.softmax((g + self.switch_logits) / self.switch_temperature[0], dim=-1)
-        # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
         
-        if (self.switch_logits.requires_grad and not self.config.soft_switch) or \
-            (not self.switch_logits.requires_grad and not self.config.soft_train):
-            y_hard = Gumbel.onehot_from_logits(weights)
-            #print(y_hard[0], "random")
-            weights = (y_hard - weights).detach() + weights
+        self.gumbel_noise =  self.gumbel.sample(sample_size).to(self.probs.device)
+
+    def forward(self, x):
+        self.switch_mode()
+
+        if self.config.algo.name == 'fair_darts':
+            weights = torch.sigmoid(self.switch_logits).unsqueeze(0)
+        elif self.config.algo.name == 'darts':
+            weights = torch.softmax(self.switch_logits, dim=-1)
+        elif self.config.algo.name in ['gdas', 'gumbel-darts']:
+            # Compute the weights of the convex sum.
+            weights = torch.softmax((self.gumbel_noise + self.switch_logits) / self.switch_temperature[0], dim=-1)
+            # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
+            if (self.switch_logits.requires_grad and not self.config.soft_switch) or \
+                (not self.switch_logits.requires_grad and not self.config.soft_train):
+                y_hard = Gumbel.onehot_from_logits(weights)
+                weights = (y_hard - weights).detach() + weights
+        else:
+            raise NotImplementedError(f'{self.config.algo.name} did not implemented!')
         
-        # weights = torch.nn.functional.gumbel_softmax(logits=self.switch_logits.expand(sample_size).to(self.probs.device), tau=self.switch_temperature, hard=(self.hard))
-        # Compute the output.
         return weights, torch.argmax(weights[0], dim=-1)
 
     def forward_at_branch_lora(self, x):
@@ -814,7 +813,6 @@ class AdapterSwitch(nn.Module):
 class Adapter(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-
 
 class Gumbel:
     def __init__(self) -> None:
@@ -1003,12 +1001,7 @@ class LoRAAdapter(nn.Module):
             # _modules[p['k']] = p['m']
 
         self.attn = self.layer_result = None                 
-    '''
-    def __init__(self, q_indim, q_outdim, v_indim, v_outdim, rank=8):
-        super().__init__()
-        self.q_proj = lora.Linear(q_indim, q_outdim, r=rank)
-        self.v_proj = lora.Linear(v_indim, v_outdim, r=rank)
-    '''
+
     def forward(self, x, parent, **kwargs):
         residual = x
         self_attn_mask = kwargs['self_attn_mask']

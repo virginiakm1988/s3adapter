@@ -623,3 +623,17 @@ class HubertModel(torch.nn.Module):
         assert stage == 1 or stage == 2, "stage most be 1 or 2"
         for layer in self.encoder.layers:
             layer.adapterswitch.config.stage = stage
+
+    def sample_gumbel(self):
+        # Sample gumbel noise for switch
+        for layer in self.encoder.layers:
+            layer.adpaterswitch.sample_gumbel()
+
+    # For the second-order approximation in DARTS algorithm
+    def use_virtual(self):
+        for layer in self.encoder.layers:
+            layer.use_virtual()
+
+    def use_default(self):
+        for layer in self.encoder.layers:
+            layer.use_default()

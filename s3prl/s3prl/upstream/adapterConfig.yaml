@@ -16,10 +16,17 @@ adapter:
     baseline: -1
     fix_thres: 0.8
     # soft_adapter: False
-    soft_train: False   # Set to True if you don't want to use one-hot when training weight
-    soft_switch: False  # Set to True if you don't want to use one-hot when training switch
-    fair_darts: False   # Set to Ture if you want to use Fair-DARTS, should accompany with soft_train = soft_switch = True
-    aux_loss_ratio: 10
+    algo: 
+      name: gdas          # choose from ['gdas', 'darts', 'fair_darts', 's3delta', 'gumbel_darts']
+      soft_train: False   # Set to True if you don't want to use one-hot when training weight
+      soft_switch: False  # Set to True if you don't want to use one-hot when training switch
+      use_gumbel: True    # Set this to True if using sampling-related algorithm, which includes ['s3delta', 'gdas', 'gumbel_darts']
+      # For DARTS-based algorithm
+      first_order_approx: False
+      # For Fair-DARTS
+      aux_loss_ratio: 10  # Scaling factor to zero-one loss
+      # For S3Delta
+      shift_tau: 1
 
   houlsby:
     input: false

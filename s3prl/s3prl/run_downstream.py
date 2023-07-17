@@ -13,6 +13,7 @@ from torch.distributed import is_initialized, get_world_size
 from s3prl import hub
 from s3prl.downstream.runner import Runner
 from s3prl.utility.helper import backup, get_time_tag, hack_isinstance, is_leader_process, override
+from s3prl.upstream.search_utils import setup_algo
 
 from huggingface_hub import HfApi, HfFolder
 
@@ -80,7 +81,7 @@ def get_downstream_args():
     parser.add_argument('--ngpu', type=int, default=1)
     parser.add_argument('--f_lr', action='store_true', help="reschedule featurizer lr")
     parser.add_argument('--f_lr_stage', type=int, help="stage to start training featurizer", default=2)
-    parser.add_argument('--f_lr_mode', type=str, help="parameters train with weighted sum at stage 1", default="switch")
+    parser.add_argument('--f_lr_mode', type=str, help="parameters train with weighted sum at stage 1", default="train")
     parser.add_argument('-r', '--upstream_refresh', action='store_true', help='Re-download cached ckpts for on-the-fly upstream variants')
     parser.add_argument('-f', '--upstream_trainable', action='store_true', help='Fine-tune, set upstream.train(). Default is upstream.eval()')
     parser.add_argument('-s', '--upstream_feature_selection', default='hidden_states', help='Specify the layer to be extracted as the representation')
@@ -173,7 +174,6 @@ def get_downstream_args():
         os.makedirs(args.expdir, exist_ok=True)
 
         if args.config is None:
-            print("150 No config!")
             args.config = f'./downstream/{args.downstream}/config.yaml'
         with open(args.config, 'r') as file:
             config = yaml.load(file, Loader=yaml.FullLoader)
@@ -185,6 +185,7 @@ def get_downstream_args():
         if args.upstream_adapter_config is not None and os.path.isfile(args.upstream_adapter_config):
             backup_files.append(args.upstream_adapter_config)
         config['adapter_config'] = adapter_config['adapter']
+        setup_algo(config['adapter_config'])
     if args.override is not None and args.override.lower() != "none":
         override(args.override, args, config)
         os.makedirs(args.expdir, exist_ok=True)

@@ -3624,9 +3624,29 @@ class TransformerSentenceEncoderLayer(nn.Module):
             # self.deltaModules.append(m(self))
         
         self.deltaModules = np.array(self.deltaModules)
+        if self.config.switch.algo.name in ['darts', 'fair-darts'] and not self.config.switch.algo.first_order_approx:
+            self.virtual_modules = [deltaModules[adapter_name](self) for adapter_name in self.used_adapter]
+            self.virtual_modules = np.array(self.virtual_modules)
+        self.curr_modules = self.deltaModules
         self.deltaList = nn.ModuleList(self.deltaModules)
         # assert self.adapterIdx['skip'] in self.adapterConfig.adapter.switch.path, "Need skip!"
         # self.add_module("switch", AdapterSwitch(num_paths=self.nas_ops))
+
+    def copy_params(self):
+        para_list = []
+        for i in range(len(self.virtual_modules)):
+            self.virtual_modules[i].load_state_dict(self.deltaModules[i].state_dict())
+            para_list.append(self.virtual_modules[i].parameters())
+        return para_list
+
+    def use_virtual(self):
+        para_list = self.copy_params()
+        self.curr_modules = self.virtual_modules
+        return para_list
+
+    def use_default(self):
+        self.curr_modules = self.deltaModules
+
     def forward(
         self,
         x: torch.Tensor,
@@ -3693,7 +3713,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
                 x = self.adapterswitch(adapterStack)
         else:
-            
+            deltaModules = self.curr_modules
             if self.adapterConfig.adapter.switch.stage == 1 and self.adapterswitch.training:
                 '''
                 multiPath = [
@@ -3736,7 +3756,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                     (self.adapterswitch.switch_logits.requires_grad and self.adapterConfig.adapter.switch.soft_switch):
                     # Linear combination of all path's output with their corresponding weights
                     all_x, all_layer_result = [], []
-                    for i, delta_module in enumerate(self.deltaModules):
+                    for i, delta_module in enumerate(deltaModules):
                         x_, (attn, layer_result_) = \
                             delta_module(
                                 x,
@@ -3765,7 +3785,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 else:
                     # One-Hot
                     res = \
-                        self.deltaModules[maxIdx](
+                        deltaModules[maxIdx](
                             x,  
                             self, 
                             self_attn_mask=self_attn_mask, 
@@ -3779,7 +3799,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                     attn = res[-1][0]  # self.deltaModules[self.adapterIdx['skip']].attn
                     layer_result = res[-1][1] # self.deltaModules[self.adapterIdx['skip']].layer_result
             else:
-                x, (attn, layer_result) = self.deltaModules[self.adapterswitch.fixed_idx](
+                x, (attn, layer_result) = deltaModules[self.adapterswitch.fixed_idx](
                     x, self, 
                     self_attn_mask=self_attn_mask, 
                     self_attn_padding_mask=self_attn_padding_mask, 

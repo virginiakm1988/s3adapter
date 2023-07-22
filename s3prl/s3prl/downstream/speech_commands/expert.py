@@ -53,10 +53,39 @@ class DownstreamExpert(nn.Module):
             output_dim = self.full_train_dataset.class_num,
             **model_conf,
         )
+        self.curr_projector = self.projector
+        self.curr_model = self.model
+        if 'do_virtual' in kwargs and kwargs['do_virtual']:
+            self.virtual_projector = nn.Linear(upstream_dim, self.modelrc['projector_dim'])
+            self.virtual_model = model_cls(
+                input_dim = self.modelrc['projector_dim'],
+                output_dim = self.full_train_dataset.class_num,
+                **model_conf,
+            )
+            for virtual_p in self.virtual_projector.parameters():
+                setattr(virtual_p, '__is_virtual__', True)
+            for virtual_p in self.virtual_model.parameters():
+                setattr(virtual_p, '__is_virtual__', True)
 
         self.objective = nn.CrossEntropyLoss()
         self.expdir = expdir
         self.register_buffer('best_score', torch.zeros(1))
+
+    # Interface
+    def copy_params(self):
+        self.virtual_projector.load_state_dict(self.projector.state_dict())
+        self.virtual_model.load_state_dict(self.model.state_dict())
+
+    # Interface
+    def use_virtual(self):
+        self.copy_params()
+        self.curr_projector = self.virtual_projector
+        self.curr_model = self.virtual_model
+        
+    # Interface
+    def use_default(self):
+        self.curr_projector = self.projector
+        self.curr_model = self.model
 
     def _get_balanced_train_dataloader(self, dataset: torch.utils.data.Subset, drop_last=False):
         if len(dataset) == 0:
@@ -116,8 +145,8 @@ class DownstreamExpert(nn.Module):
         device = features[0].device
         features_len = torch.IntTensor([len(feat) for feat in features]).to(device=device)
         features = pad_sequence(features, batch_first=True)
-        features = self.projector(features)
-        predicted, _ = self.model(features, features_len)
+        features = self.curr_projector(features)
+        predicted, _ = self.curr_model(features, features_len)
 
         labels = torch.LongTensor(labels).to(features.device)
         loss = self.objective(predicted, labels)
@@ -139,6 +168,8 @@ class DownstreamExpert(nn.Module):
         wandb.define_metric("dev-loss", summary="min")
         wandb.define_metric("train-acc", summary="max")
         wandb.define_metric("train-loss", summary="min")
+        wandb.define_metric("train-total_loss", summary="min")
+
         results = {}
         key_prefix = f"{mode}"
         if 'layers' in kwargs:
@@ -146,6 +177,7 @@ class DownstreamExpert(nn.Module):
                 # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
                 for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
                     results.update({f"layer_{i}/{mode}_{layer.used_adapter[j]}": logit.item()})
+                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
         if 'norm_weights' in kwargs:
             for i, weight in enumerate(kwargs['norm_weights']):
                 results.update({f"{key_prefix}_norm_weights_{i}": weight})
@@ -169,6 +201,20 @@ class DownstreamExpert(nn.Module):
                         self.best_score = (torch.ones(1) * average).to(self.best_score.device)
                         f.write(f'New best on {mode} at step {global_step}: {average}\n')
                         save_names.append(f'{mode}-best.ckpt')
+
+        if mode == 'train': 
+            average_aux_loss = torch.FloatTensor(records['aux_loss']).mean().item() if len(records['aux_loss']) > 0 else 0
+            logger.add_scalar(
+                f'speech_commands/{mode}-aux_loss', average_aux_loss, global_step=global_step
+            )
+            results.update({f'{mode}-aux_loss': average_aux_loss})
+            #print(f'aux_loss {average_aux_loss}')
+
+            total_loss = results['loss'] + average_aux_loss
+            logger.add_scalar(
+                f'speech_commands/{mode}-total_loss', total_loss, global_step=global_step
+            )
+            results.update({f'{mode}-total_loss': total_loss})
 
         wandb.log(results, step=global_step)
 

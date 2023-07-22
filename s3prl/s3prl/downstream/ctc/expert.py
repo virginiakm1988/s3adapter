@@ -43,6 +43,22 @@ class DownstreamExpert(nn.Module):
             upstream_rate=upstream_rate,
             **modelrc.get(model_select, {}),
         )
+
+        self.curr_projector = self.projector
+        self.curr_model = self.model
+        if 'do_virtual' in kwargs and kwargs['do_virtual']:
+            self.virtual_projector = nn.Linear(upstream_dim, modelrc["project_dim"])
+            self.virtual_model = eval(model_select)(
+                modelrc["project_dim"],
+                self.tokenizer.vocab_size,
+                upstream_rate=upstream_rate,
+                **modelrc.get(model_select, {}),
+            )
+            for virtual_p in self.virtual_projector.parameters():
+                setattr(virtual_p, '__is_virtual__', True)
+            for virtual_p in self.virtual_model.parameters():
+                setattr(virtual_p, '__is_virtual__', True)
+        
         self.objective = nn.CTCLoss(
             blank=self.tokenizer.pad_idx,
             zero_infinity=modelrc["zero_infinity"],
@@ -64,6 +80,22 @@ class DownstreamExpert(nn.Module):
         return f'ctc-{self.corpus["name"].lower()}'
 
     # Interface
+    def copy_params(self):
+        self.virtual_projector.load_state_dict(self.projector.state_dict())
+        self.virtual_model.load_state_dict(self.model.state_dict())
+
+    # Interface
+    def use_virtual(self):
+        self.copy_params()
+        self.curr_projector = self.virtual_projector
+        self.curr_model = self.virtual_model
+        
+    # Interface
+    def use_default(self):
+        self.curr_projector = self.projector
+        self.curr_model = self.model
+
+    # Interface
     def get_dataloader(self, split, mode=None, epoch=None):
         return load_dataset(split, self.tokenizer, self.corpus,  
                     switch_ratio=self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1 and mode != 'train_stage2'))
@@ -81,8 +113,8 @@ class DownstreamExpert(nn.Module):
             padding_value=self.tokenizer.pad_idx,
         ).to(device=device)
 
-        features = self.projector(features)
-        logits, log_probs_len = self.model(features, features_len)
+        features = self.curr_projector(features)
+        logits, log_probs_len = self.curr_model(features, features_len)
         log_probs = nn.functional.log_softmax(logits, dim=-1)
 
         loss = self.objective(
@@ -121,6 +153,7 @@ class DownstreamExpert(nn.Module):
         wandb.define_metric("dev-loss", summary="min")
         wandb.define_metric("train-per", summary="min")
         wandb.define_metric("train-loss", summary="min")
+        wandb.define_metric("train-total_loss", summary="min")
         results = {}
         key_prefix = f"{split}"
         # if 'adapter_mode' in kwargs:
@@ -128,6 +161,19 @@ class DownstreamExpert(nn.Module):
         
         loss = torch.FloatTensor(records["loss"]).mean().item()
         results.update({f"{key_prefix}-loss": loss})
+
+        if 'train' in key_prefix: 
+            average_aux_loss = torch.FloatTensor(records['aux_loss']).mean().item() if len(records['aux_loss']) > 0 else 0
+            logger.add_scalar(
+                f'{self._get_task_name()}/{key_prefix}-aux_loss', average_aux_loss, global_step=global_step
+            )
+            results.update({f'{key_prefix}-aux_loss': average_aux_loss})
+
+            total_loss = results['loss'] + average_aux_loss
+            logger.add_scalar(
+                f'{self._get_task_name()}/{key_prefix}-total_loss', total_loss, global_step=global_step
+            )
+            results.update({f'{key_prefix}-total_loss': total_loss})
         
         if 'layers' in kwargs:
             for i, layer in enumerate(kwargs['layers']):

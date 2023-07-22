@@ -35,10 +35,12 @@ def get_downstream_args():
     parser.add_argument('--stage1_ratio', type=float, default=0.0)
     parser.add_argument('--online', action='store_true')
     # Enable weighted sum
-    parser.add_argument('--stage1_weighted_sum', action='store_true', default=False)
-    parser.add_argument('--stage2_weighted_sum', action='store_false', default=True)
     parser.add_argument('--stage2_ckpt', default=None)
-
+    # Architecture search algorithm
+    parser.add_argument('--search_algo', type=str, 
+                        help='Specified algorithm for architecture search. Default algorithm is GDAS.', 
+                        default='gdas', 
+                        choices=['gdas', 'darts', 'fair_darts', 'gumbel_darts'])
     # distributed training
     parser.add_argument('--backend', default='nccl', help='The backend for distributed training')
     parser.add_argument('--local_rank', type=int,
@@ -185,10 +187,15 @@ def get_downstream_args():
         if args.upstream_adapter_config is not None and os.path.isfile(args.upstream_adapter_config):
             backup_files.append(args.upstream_adapter_config)
         config['adapter_config'] = adapter_config['adapter']
-        setup_algo(config['adapter_config'])
+        config['adapter_config']['switch']['algo']['name'] = args.search_algo
+        config['adapter_config'] = setup_algo(config['adapter_config'])
+
     if args.override is not None and args.override.lower() != "none":
         override(args.override, args, config)
         os.makedirs(args.expdir, exist_ok=True)
+    
+    if 'adapter_config' in config.keys():
+        print(config['adapter_config'])
     
     return args, config, backup_files
 

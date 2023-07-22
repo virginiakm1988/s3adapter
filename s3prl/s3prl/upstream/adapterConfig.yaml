@@ -1,11 +1,10 @@
 adapter:
   exist: true
-  type: ['skip', 'seq', 'para', 'lora', 'lnfit', 'bitfit']
+  type: ['skip', 'seq', 'para', 'lora', 'bitfit']
   switch: 
     first: false
     exist: true
-    # hard: True
-    path: [0, 1, 2, 3, 4, 5]
+    path: [0, 1, 2, 3, 4]
     tau:
       type: linear
       init_value: 5
@@ -15,20 +14,18 @@ adapter:
     # freq: 0.1  # 0~1
     baseline: -1
     fix_thres: 0.8
-    # soft_adapter: False
     algo: 
       name: gdas          # choose from ['gdas', 'darts', 'fair_darts', 's3delta', 'gumbel_darts']
-      soft_train: False   # Set to True if you don't want to use one-hot when training weight
-      soft_switch: False  # Set to True if you don't want to use one-hot when training switch
-      use_gumbel: True    # Set this to True if using sampling-related algorithm, which includes ['s3delta', 'gdas', 'gumbel_darts']
+      soft_train:         # Set to True if you don't want to use one-hot when training weight
+      soft_switch:        # Set to True if you don't want to use one-hot when training switch
+      use_gumbel:         # Set this to True if using sampling-related algorithm, which includes ['s3delta', 'gdas', 'gumbel_darts']
       # For DARTS-based algorithm
-      first_order_approx: False
+      first_order:
+      second_order:       # Calculate Hessian
       # For Fair-DARTS
-      aux_loss_ratio: 10  # Scaling factor to zero-one loss
+      aux_loss_ratio:     # Scaling factor to zero-one loss
       # For S3Delta
-      shift_tau: 1
+      shift_tau:
 
   houlsby:
     input: false
-
-# 0: seq adp, 1: no adp, 2: para adp

@@ -14,6 +14,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+import functools
+
 from ..wav2vec2.wav2vec2_model import (
     get_available_activation_fns,
     compute_mask_indices,
@@ -609,31 +611,14 @@ class HubertModel(torch.nn.Module):
         self.target_glu = None
         self.final_proj = None
 
-    def reduce_tau(self):
-        for layer in self.encoder.layers:
-            layer.adapterswitch.reduce_tau()
+    @property
+    def all_alpha(self):
+        return torch.stack([layer.adapterswitch.parameters() for layer in self.encoder.layers], dim=0).view(-1)
     
-    def aux_loss(self):
-        loss = 0
+    @functools.cached_property
+    def param_nums(self):
+        all_param_nums = []
         for layer in self.encoder.layers:
-            loss += layer.aux_loss()
-        return loss
-
-    def set_stage(self, stage: int):
-        assert stage == 1 or stage == 2, "stage most be 1 or 2"
-        for layer in self.encoder.layers:
-            layer.adapterswitch.config.stage = stage
-
-    def sample_gumbel(self):
-        # Sample gumbel noise for switch
-        for layer in self.encoder.layers:
-            layer.adpaterswitch.sample_gumbel()
-
-    # For the second-order approximation in DARTS algorithm
-    def use_virtual(self):
-        for layer in self.encoder.layers:
-            layer.use_virtual()
-
-    def use_default(self):
-        for layer in self.encoder.layers:
-            layer.use_default()
+            for delta_module in layer.delta_modules:
+                all_param_nums.append(sum(p.nelement() for p in delta_module.parameters()))
+        return all_param_nums

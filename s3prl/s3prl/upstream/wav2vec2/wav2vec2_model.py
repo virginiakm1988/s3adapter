@@ -711,7 +711,7 @@ class MultiheadAttention(nn.Module):
         xformers_blocksparse_blocksize: Optional[
             int
         ] = 16,  # This should be part of the config
-        adapterConfig: object = None,
+        adapter_config: object = None,
     ):
         super().__init__()
 
@@ -749,19 +749,8 @@ class MultiheadAttention(nn.Module):
             "Self-attention requires query, key and " "value to be of the same size"
         )
 
-        self.use_lora = False # (adapterConfig.adapter.exist and 'lora' in adapterConfig.adapter.type)
-        self.use_bitfit = False  #(adapterConfig.adapter.exist and 'bitfit' in adapterConfig.adapter.type)
         self.q_noise = q_noise
         self.qn_block_size = qn_block_size
-        ####LoRA####
-        if self.use_lora:  # 'lora' in sys.argv[-1]:
-            self.lora_v_proj = quant_noise(
-                lora.Linear(self.vdim, embed_dim, r=8), q_noise, qn_block_size
-            )
-
-            self.lora_q_proj = quant_noise(
-                lora.Linear(embed_dim, embed_dim, r=8), q_noise, qn_block_size
-            )
 
         self.v_proj = quant_noise(
             nn.Linear(self.vdim, embed_dim, bias=bias), q_noise, qn_block_size
@@ -777,12 +766,6 @@ class MultiheadAttention(nn.Module):
         self.out_proj = quant_noise(
             nn.Linear(embed_dim, embed_dim, bias=bias), q_noise, qn_block_size
         )
-
-        if self.use_bitfit:
-            self.bitfit_bias_q = nn.Parameter(torch.Tensor(1, 1, embed_dim))
-            self.bitfit_bias_k = nn.Parameter(torch.Tensor(1, 1, embed_dim))
-            self.bitfit_bias_v = nn.Parameter(torch.Tensor(1, 1, embed_dim))
-            self.bitfit_bias_out = nn.Parameter(torch.Tensor(1, 1, embed_dim))
 
         if add_bias_kv:
             self.bias_k = nn.Parameter(torch.Tensor(1, 1, embed_dim))
@@ -807,25 +790,14 @@ class MultiheadAttention(nn.Module):
             nn.init.xavier_uniform_(self.k_proj.weight, gain=1 / math.sqrt(2))
             nn.init.xavier_uniform_(self.v_proj.weight, gain=1 / math.sqrt(2))
             nn.init.xavier_uniform_(self.q_proj.weight, gain=1 / math.sqrt(2))
-            if self.use_lora:
-                nn.init.xavier_uniform_(self.lora_v_proj.weight, gain=1 / math.sqrt(2))
-                nn.init.xavier_uniform_(self.lora_q_proj.weight, gain=1 / math.sqrt(2))
         else:
             nn.init.xavier_uniform_(self.k_proj.weight)
             nn.init.xavier_uniform_(self.v_proj.weight)
             nn.init.xavier_uniform_(self.q_proj.weight)
-            if self.use_lora:
-                nn.init.xavier_uniform_(self.lora_v_proj.weight)
-                nn.init.xavier_uniform_(self.lora_q_proj.weight)
 
         nn.init.xavier_uniform_(self.out_proj.weight)
         if self.out_proj.bias is not None:
             nn.init.constant_(self.out_proj.bias, 0.0)
-            if self.use_bitfit:
-                self.bitfit_bias_q = self.q_proj.bias
-                self.bitfit_bias_k = self.k_proj.bias
-                self.bitfit_bias_v = self.v_proj.bias
-                nn.init.constant_(self.bitfit_bias_out, 0.0)
         if self.bias_k is not None:
             nn.init.xavier_normal_(self.bias_k)
         if self.bias_v is not None:
@@ -1171,40 +1143,18 @@ class MultiheadAttention(nn.Module):
                     key = value = None
         else:
             saved_state = None
-        # adapter
-        lora_q = lora_v = None
-        bitfit_q = bitfit_k = bitfit_v = None
 
         if self.self_attention:
             q = q_proj(query)# self.q_proj(query)
             k = k_proj(query)# self.k_proj(query)
             v = v_proj(query)# self.v_proj(query)
-            # adapter
-            if self.use_lora:
-                lora_q = self.lora_q_proj(query)
-                lora_v = self.lora_v_proj(query)
-            if self.use_bitfit:
-                bitfit_q = F.linear(query, self.q_proj.weight, self.bitfit_bias_q)
-                bitfit_k = F.linear(query, self.k_proj.weight, self.bitfit_bias_k)
-                bitfit_v = F.linear(query, self.v_proj.weight, self.bitfit_bias_v)
-
         elif self.encoder_decoder_attention:
             # encoder-decoder attention
             q = self.q_proj(query)
-            # adapter
-            if self.use_lora:
-                lora_q = self.lora_q_proj(query)
-            if self.use_bitfit:
-                bitfit_q = F.linear(query, self.q_proj.weight, self.bitfit_bias_q)
             
             if key is None:
                 assert value is None
                 k = v = None
-                # adapter
-                if self.use_lora:
-                    lora_v = None
-                if self.use_bitfit:
-                    bitfit_v = None
             else:
                 if self.beam_size > 1 and bsz == key.size(1):
                     # key is [T, bsz*beam_size, C], reduce to [T, bsz, C]
@@ -1217,33 +1167,13 @@ class MultiheadAttention(nn.Module):
                         )[:, 0, :]
                 k = k_proj(key) # self.k_proj(key)
                 v = v_proj(key) # self.v_proj(key)
-                # adapter
-                if self.use_lora:
-                    lora_v = self.lora_v_proj(key)
-                if self.use_bitfit:
-                    bitfit_k = F.linear(query, self.k_proj.weight, self.bitfit_bias_k)
-                    bitfit_v = F.linear(query, self.v_proj.weight, self.bitfit_bias_v)
-
         else:
             assert key is not None and value is not None
             q = q_proj(query) # self.q_proj(query)
             k = k_proj(key) # self.k_proj(key)
             v = v_proj(value) # self.v_proj(value)
-            # adapter
-            if self.use_lora:
-                lora_q = self.lora_q_proj(query)
-                lora_v = self.lora_v_proj(value)
-            if self.use_bitfit:
-                bitfit_q = F.linear(query, self.q_proj.weight, self.bitfit_bias_q)
-                bitfit_k = F.linear(query, self.k_proj.weight, self.bitfit_bias_k)
-                bitfit_v = F.linear(query, self.v_proj.weight, self.bitfit_bias_v)
 
         q *= self.scaling
-        # adapter
-        if self.use_lora:
-            lora_q *= self.scaling
-        if self.use_bitfit:
-            bitfit_q *= self.scaling
 
         if self.bias_k is not None:
             assert self.bias_v is not None
@@ -1257,19 +1187,6 @@ class MultiheadAttention(nn.Module):
             .view(tgt_len, bsz * self.num_heads, self.head_dim)
             .transpose(0, 1)
         )
-        # adapter
-        if self.use_lora:
-            lora_q = (
-                lora_q.contiguous()
-                .view(tgt_len, bsz * self.num_heads, self.head_dim)
-                .transpose(0, 1)
-            )
-        if self.use_bitfit:
-            bitfit_q = (
-                bitfit_q.contiguous()
-                .view(tgt_len, bsz * self.num_heads, self.head_dim)
-                .transpose(0, 1)
-            )
 
         kv_bsz = bsz  # need default value for scripting
         if k is not None:
@@ -1279,31 +1196,10 @@ class MultiheadAttention(nn.Module):
                 .view(-1, kv_bsz * self.num_heads, self.head_dim)
                 .transpose(0, 1)
             )
-        # adapter
-        if bitfit_k is not None:
-            kv_bsz = k.size(1)
-            bitfit_k = (
-                bitfit_k.contiguous()
-                .view(-1, kv_bsz * self.num_heads, self.head_dim)
-                .transpose(0, 1)
-            )
 
         if v is not None:
             v = (
                 v.contiguous()
-                .view(-1, kv_bsz * self.num_heads, self.head_dim)
-                .transpose(0, 1)
-            )
-        # adapter
-        if lora_v is not None:
-            lora_v = (
-                lora_v.contiguous()
-                .view(-1, kv_bsz * self.num_heads, self.head_dim)
-                .transpose(0, 1)
-            )
-        if bitfit_v is not None:
-            bitfit_v = (
-                bitfit_v.contiguous()
                 .view(-1, kv_bsz * self.num_heads, self.head_dim)
                 .transpose(0, 1)
             )
@@ -1357,10 +1253,6 @@ class MultiheadAttention(nn.Module):
         assert k is not None
         assert k.size(1) == src_len
 
-        if self.use_bitfit:
-            assert bitfit_k is not None
-            assert bitfit_k.size(1) == src_len
-
         # This is part of a workaround to get around fork/join parallelism
         # not supporting Optional types.
         if key_padding_mask is not None and key_padding_mask.dim() == 0:
@@ -1373,20 +1265,9 @@ class MultiheadAttention(nn.Module):
         if self.add_zero_attn:
             assert v is not None
             src_len += 1
-            tmp_k = torch.Tensor.copy_(k)
             k, v, key_padding_mask, attn_mask = self._append_zero_attn(
                 k=k, v=v, key_padding_mask=key_padding_mask, attn_mask=attn_mask
-            )
-            # adapter
-            if self.use_lora:
-                lora_k, lora_v, key_padding_mask, attn_mask = self._append_zero_attn(
-                    k=tmp_k, v=lora_v, key_padding_mask=key_padding_mask, attn_mask=attn_mask
-                )
-            if self.use_bitfit:
-                bitfit_k, bitfit_v, key_padding_mask, attn_mask = self._append_zero_attn(
-                    k=bitfit_k, v=bitfit_v, key_padding_mask=key_padding_mask, attn_mask=attn_mask
-                )
-            del tmp_k      
+            )     
 
         lora_attn_weights = None
         bitfit_attn_weights = None
@@ -1397,21 +1278,6 @@ class MultiheadAttention(nn.Module):
                 k.view((kv_bsz, self.num_heads) + k.size()[1:]),
             )
             attn_weights = attn_weights.reshape((-1,) + attn_weights.size()[-2:])
-            # adapter
-            if self.use_lora:
-                lora_attn_weights = torch.einsum(
-                    "bxhtd,bhsd->bxhts",
-                    lora_q.view((kv_bsz, -1, self.num_heads) + lora_q.size()[1:]),
-                    lora_k.view((kv_bsz, self.num_heads) + lora_k.size()[1:]),
-                )
-                lora_attn_weights = lora_attn_weights.reshape((-1,) + lora_attn_weights.size()[-2:])
-            if self.use_bitfit:
-                bitfit_attn_weights = torch.einsum(
-                    "bxhtd,bhsd->bxhts",
-                    bitfit_q.view((kv_bsz, -1, self.num_heads) + bitfit_q.size()[1:]),
-                    bitfit_k.view((kv_bsz, self.num_heads) + bitfit_k.size()[1:]),
-                )
-                bitfit_attn_weights = bitfit_attn_weights.reshape((-1,) + bitfit_attn_weights.size()[-2:])
         else:
             attn_weights = torch.bmm(q, k.transpose(1, 2))
             # adapter
@@ -1422,33 +1288,16 @@ class MultiheadAttention(nn.Module):
         
         attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)
         assert list(attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
-        # adapter
-        if self.use_lora:
-            lora_attn_weights = self.apply_sparse_mask(lora_attn_weights, tgt_len, src_len, bsz)
-            assert list(lora_attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
-        if self.use_bitfit:
-            bitfit_attn_weights = self.apply_sparse_mask(bitfit_attn_weights, tgt_len, src_len, bsz)
-            assert list(bitfit_attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
 
         if attn_mask is not None:
             attn_mask = attn_mask.unsqueeze(0)
             if self.onnx_trace:
                 attn_mask = attn_mask.repeat(attn_weights.size(0), 1, 1)
             attn_weights += attn_mask
-            # adapter
-            if self.use_lora:
-                lora_attn_weights += attn_mask
-            if self.use_bitfit:
-                bitfit_attn_weights += attn_mask
 
         if key_padding_mask is not None:
             # don't attend to padding symbols
             attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            # adpater
-            if self.use_lora:
-                lora_attn_weights = lora_attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            if self.use_bitfit:
-                bitfit_attn_weights = bitfit_attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
 
             if not is_tpu:
                 attn_weights = attn_weights.view(
@@ -1461,50 +1310,13 @@ class MultiheadAttention(nn.Module):
                     .to(torch.bool),
                     float("-inf"),
                 )
-                # adapter
-                if self.use_lora:
-                    lora_attn_weights = lora_attn_weights.view(
-                        kv_bsz, -1, self.num_heads, tgt_len, src_len
-                    )
-                    lora_attn_weights = lora_attn_weights.masked_fill(
-                        key_padding_mask.unsqueeze(1)
-                        .unsqueeze(2)
-                        .unsqueeze(3)
-                        .to(torch.bool),
-                        float("-inf"),
-                    )
-                if self.use_bitfit:
-                    bitfit_attn_weights = attn_weights.view(
-                        kv_bsz, -1, self.num_heads, tgt_len, src_len
-                    )
-                    bitfit_attn_weights = bitfit_attn_weights.masked_fill(
-                        key_padding_mask.unsqueeze(1)
-                        .unsqueeze(2)
-                        .unsqueeze(3)
-                        .to(torch.bool),
-                        float("-inf"),
-                    )
             else:
                 attn_weights = attn_weights.transpose(0, 2)
                 attn_weights = attn_weights.masked_fill(key_padding_mask, float("-inf"))
                 attn_weights = attn_weights.transpose(0, 2)
-                # adapter
-                if self.use_lora:
-                    lora_attn_weights = lora_attn_weights.transpose(0, 2)
-                    lora_attn_weights = lora_attn_weights.masked_fill(key_padding_mask, float("-inf"))
-                    lora_attn_weights = lora_attn_weights.transpose(0, 2)
-                if self.use_bitfit:
-                    bitfit_attn_weights = bitfit_attn_weights.transpose(0, 2)
-                    bitfit_attn_weights = bitfit_attn_weights.masked_fill(key_padding_mask, float("-inf"))
-                    bitfit_attn_weights = bitfit_attn_weights.transpose(0, 2)
             
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-            # adapter
-            if self.use_lora:
-                lora_attn_weights = lora_attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-            if self.use_bitfit:
-                bitfit_attn_weights = bitfit_attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
+            
         if before_softmax:
             return ((attn_weights, v), (lora_attn_weights, lora_v), bitfit_attn_weights)
 
@@ -1519,20 +1331,7 @@ class MultiheadAttention(nn.Module):
         )
         attn_weights = attn_weights_float.type_as(attn_weights)
         attn_probs = self.dropout_module(attn_weights)
-        # adapter
-        if self.use_lora:
-            lora_attn_weights_float = softmax_supporting_onnx_trace(
-                lora_attn_weights, dim=-1, onnx_trace=self.onnx_trace
-            )
-            lora_attn_weights = lora_attn_weights_float.type_as(lora_attn_weights)
-            lora_attn_probs = self.dropout_module(lora_attn_weights)
-        if self.use_bitfit:
-            bitfit_attn_weights_float = softmax_supporting_onnx_trace(
-                bitfit_attn_weights, dim=-1, onnx_trace=self.onnx_trace
-            )
-            bitfit_attn_weights = bitfit_attn_weights_float.type_as(bitfit_attn_weights)
-            bitfit_attn_probs = self.dropout_module(bitfit_attn_weights)
-
+        
         assert v is not None
         if self.encoder_decoder_attention and bsz != kv_bsz:
             attn = torch.einsum(
@@ -1554,54 +1353,8 @@ class MultiheadAttention(nn.Module):
                 ),
             )
             attn = attn.reshape((-1,) + attn.size()[-2:])
-            # adapter
-            if self.use_lora:
-                lora_attn = torch.einsum(
-                    "bxhts,bhsd->bxhtd",
-                    lora_attn_probs.view(
-                        (
-                            kv_bsz,
-                            -1,
-                            self.num_heads,
-                        )
-                        + lora_attn_probs.size()[1:]
-                    ),
-                    lora_v.view(
-                        (
-                            kv_bsz,
-                            self.num_heads,
-                        )
-                        + lora_v.size()[1:]
-                    ),
-                )
-                lora_attn = lora_attn.reshape((-1,) + lora_attn.size()[-2:])
-            if self.use_bitfit:
-                attn = torch.einsum(
-                    "bxhts,bhsd->bxhtd",
-                    bitfit_attn_probs.view(
-                        (
-                            kv_bsz,
-                            -1,
-                            self.num_heads,
-                        )
-                        + bitfit_attn_probs.size()[1:]
-                    ),
-                    bitfit_v.view(
-                        (
-                            kv_bsz,
-                            self.num_heads,
-                        )
-                        + bitfit_v.size()[1:]
-                    ),
-                )
-                bitfit_attn = bitfit_attn.reshape((-1,) + bitfit_attn.size()[-2:])
         else:
             attn = torch.bmm(attn_probs, v)
-            # adapter
-            if self.use_lora:
-                lora_attn = torch.bmm(lora_attn_probs, lora_v)
-            if self.use_bitfit:
-                bitfit_attn = torch.bmm(bitfit_attn_probs, bitfit_v)
 
         assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
         if self.onnx_trace and attn.size(1) == 1:
@@ -1610,29 +1363,10 @@ class MultiheadAttention(nn.Module):
             attn = attn.contiguous().view(tgt_len, bsz, self.embed_dim)
         else:
             attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, self.embed_dim)
-        # adapter
-        if self.onnx_trace and self.use_lora and lora_attn.size(1) == 1:
-            # when ONNX tracing a single decoder step (sequence length == 1)
-            # the transpose is a no-op copy before view, thus unnecessary
-            lora_attn = lora_attn.contiguous().view(tgt_len, bsz, self.embed_dim)
-        else:
-            lora_attn = lora_attn.transpose(0, 1).contiguous().view(tgt_len, bsz, self.embed_dim)
-        if self.onnx_trace and self.use_bitfit and bitfit_attn.size(1) == 1:
-            # when ONNX tracing a single decoder step (sequence length == 1)
-            # the transpose is a no-op copy before view, thus unnecessary
-            bitfit_attn = bitfit_attn.contiguous().view(tgt_len, bsz, self.embed_dim)
-        else:
-            bitfit_attn = bitfit_attn.transpose(0, 1).contiguous().view(tgt_len, bsz, self.embed_dim)
 
         attn = self.out_proj(attn)
         attn_weights: Optional[Tensor] = None
-        # adapter
-        if self.use_lora:
-            lora_attn = self.out_proj(lora_attn)
-            lora_attn_weights = None
-        if self.use_bitfit:
-            bitfit_attn = F.linear(bitfit_attn, self.out_proj.weight, self.bitfit_bias_out)
-
+        
         if need_weights:
             attn_weights = attn_weights_float.view(
                 bsz, self.num_heads, tgt_len, src_len
@@ -1640,27 +1374,8 @@ class MultiheadAttention(nn.Module):
             if not need_head_weights:
                 # average attention weights over heads
                 attn_weights = attn_weights.mean(dim=0)
-            # adapter
-            if self.use_lora:
-                lora_attn_weights = lora_attn_weights_float.view(
-                    bsz, self.num_heads, tgt_len, src_len
-                ).transpose(1, 0)
-                if not need_head_weights:
-                    # average attention weights over heads
-                    lora_attn_weights = lora_attn_weights.mean(dim=0)
-            if self.use_bitfit:
-                bitfit_attn_weights = bitfit_attn_weights_float.view(
-                    bsz, self.num_heads, tgt_len, src_len
-                ).transpose(1, 0)
-                if not need_head_weights:
-                    # average attention weights over heads
-                    bitfit_attn_weights = bitfit_attn_weights.mean(dim=0)
 
-        return (
-            (attn, attn_weights), 
-            (lora_attn, lora_attn_weights), 
-            (bitfit_attn, bitfit_attn_weights)
-        )
+        return (attn, attn_weights)
 
     @staticmethod
     def _append_prev_key_padding_mask(
@@ -3248,7 +2963,7 @@ class TransformerEncoder(nn.Module):
                 activation_fn=args.activation_fn,
                 layer_norm_first=args.layer_norm_first,
                 layer_idx=layer_idx,
-                adapterConfig=adapterConfig,
+                adapter_config=adapterConfig,
             )
         elif args.layer_type == "conformer":
             layer = ConformerWav2Vec2EncoderLayer(
@@ -3517,7 +3232,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         layer_norm_first: bool = False,
         switch_used: bool = False,
         layer_idx: int = None,
-        adapterConfig: object = None,
+        adapter_config: object = None,
     ) -> None:
 
         super().__init__()
@@ -3533,7 +3248,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
             num_attention_heads,
             dropout=attention_dropout,
             self_attention=True,
-            adapterConfig=adapterConfig,
+            adapter_config=adapter_config,
         )
 
         self.dropout1 = nn.Dropout(dropout)
@@ -3550,68 +3265,27 @@ class TransformerSentenceEncoderLayer(nn.Module):
         # layer norm associated with the position wise feed-forward NN
         self.final_layer_norm = LayerNorm(self.embedding_dim)
         
-        # self.use_adapterbias = (adapterConfig.adapter.exist and 'adapterbias' in adapterConfig.adapter.type)
-        # self.use_sequential  = (adapterConfig.adapter.exist and 'houlsby' in adapterConfig.adapter.type)
-        # self.use_parallel    = (adapterConfig.adapter.exist and 'houlsby' in adapterConfig.adapter.type)
-        # self.use_lora        = (adapterConfig.adapter.exist and 'lora' in adapterConfig.adapter.type)
-        # self.use_bitfit      = (adapterConfig.adapter.exist and 'bitfit' in adapterConfig.adapter.type)
-        # self.use_lnfit       = (adapterConfig.adapter.exist and 'lnfit' in adapterConfig.adapter.type)
-
-        '''
-        if adapterConfig.adapter.exist:
-            if self.use_adapterbias: # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
-                print('AdapterBias!!!')
-                self.adapter_vector = nn.Parameter(torch.ones((768), requires_grad=True))
-                self.adapter_alpha = nn.Linear(ffn_embedding_dim, 1) #每個layer的xi都不一樣
-            if self.use_sequential:
-                print('Sequential!!!')
-                self.seq_adapter = nn.Sequential(
-                    nn.Linear(self.embedding_dim, 32),
-                    nn.GELU(),
-                    nn.Linear(32, self.embedding_dim),
-                )
-            if self.use_parallel:
-                print('Parallel!!!')
-                self.parallel_adapter = nn.Sequential(
-                    nn.Linear(self.embedding_dim, 32),
-                    nn.GELU(),
-                    nn.Linear(32, self.embedding_dim),
-                )
-            if self.use_lora:
-                print('LoRA!!!')
-            if self.use_bitfit:
-                print("BitFit!!!")
-                self.bitfit_fc1_bias = nn.Parameter(self.fc1.bias.detach().clone())
-                self.bitfit_fc2_bias = nn.Parameter(self.fc2.bias.detach().clone())
-                self.bitfit_ln1_bias = nn.Parameter(self.self_attn_layer_norm.bias.detach().clone())                
-                self.bitfit_ln2_bias = nn.Parameter(self.final_layer_norm.bias.detach().clone())                
-            if self.use_lnfit:
-                print('LNFit!!!')
-                self.lnfit_attn_layer_norm = deepcopy(self.self_attn_layer_norm)
-                self.lnfit_final_layer_norm = deepcopy(self.final_attn_layer_norm)
-        
-        else:
-            print('Original Hubert!!!')
-        '''
         # adapter configs...      
-        self.adapterConfig = adapterConfig
-        self.used_adapter = self.adapterConfig.adapter.type
+        self.adapter_config = adapter_config
+        self.used_adapter = self.adapter_config.adapter.type
 
         # Override adapteConfig.adapter.switch.path if the number of path is not equal to number of adapter used
-        if len(self.adapterConfig.adapter.switch.path) != len(self.used_adapter):
-            self.adapterConfig.adapter.switch.path = [i for i in range(len(self.used_adapter))]
-            logger.info("Override adapterConfig.adpater.switch.path")
+        if len(self.adapter_config.adapter.switch.path) != len(self.used_adapter):
+            self.adapter_config.adapter.switch.path = [i for i in range(len(self.used_adapter))]
+            logger.info("Override adapter_config.adpater.switch.path")
         logger.info(f"Current used adapters: {self.used_adapter}")
-        logger.info(f"Path index of adapters: {self.adapterConfig.adapter.switch.path}")
+        logger.info(f"Path index of adapters: {self.adapter_config.adapter.switch.path}")
 
         self.adapterswitch = AdapterSwitch(
-            config=self.adapterConfig.adapter.switch, 
+            config=self.adapter_config.adapter.switch, 
             layer_idx=layer_idx, 
             used_adapter_name=self.used_adapter
         )
+        for p in self.adapterswitch.parameters():
+            setattr(p, '__is_switch__', True)
         # Adapters
-        self.adapterIdx = {e: i for i, e in enumerate(self.used_adapter)}
-        deltaModules = {
+        self.adapter_idx = {e: i for i, e in enumerate(self.used_adapter)}
+        delta_modules = {
             'skip': Skip, 
             'seq': SAdapter, 
             'para': PAdapter, 
@@ -3619,33 +3293,34 @@ class TransformerSentenceEncoderLayer(nn.Module):
             'lnfit': LNFitAdapter,
             'bitfit': BitFitAdapter
         }
-        self.deltaModules = [deltaModules[adapter_name](self) for adapter_name in self.used_adapter]
-        # for m in deltaModules:
-            # self.deltaModules.append(m(self))
-        
-        self.deltaModules = np.array(self.deltaModules)
-        if self.config.switch.algo.name in ['darts', 'fair-darts'] and not self.config.switch.algo.first_order_approx:
-            self.virtual_modules = [deltaModules[adapter_name](self) for adapter_name in self.used_adapter]
+        self.delta_modules = [delta_modules[adapter_name](self) for adapter_name in self.used_adapter]
+
+        self.delta_modules = np.array(self.delta_modules)
+        self.curr_modules = self.delta_modules
+        self.delta_list = nn.ModuleList(self.delta_modules)
+        for delta_p in self.delta_list.parameters():
+            setattr(delta_p, '__is_delta__', True)
+
+        if self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts'] \
+            and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order):
+            print('Create Virtual Adapters')
+            self.virtual_modules = [delta_modules[adapter_name](self) for adapter_name in self.used_adapter]
             self.virtual_modules = np.array(self.virtual_modules)
-        self.curr_modules = self.deltaModules
-        self.deltaList = nn.ModuleList(self.deltaModules)
-        # assert self.adapterIdx['skip'] in self.adapterConfig.adapter.switch.path, "Need skip!"
-        # self.add_module("switch", AdapterSwitch(num_paths=self.nas_ops))
+            self.virtual_list = nn.ModuleList(self.virtual_modules)
+
+            for virtual_p in self.virtual_list.parameters():
+                setattr(virtual_p, '__is_virtual__', True)            
 
     def copy_params(self):
-        para_list = []
         for i in range(len(self.virtual_modules)):
-            self.virtual_modules[i].load_state_dict(self.deltaModules[i].state_dict())
-            para_list.append(self.virtual_modules[i].parameters())
-        return para_list
+            self.virtual_modules[i].load_state_dict(self.delta_modules[i].state_dict())
 
     def use_virtual(self):
-        para_list = self.copy_params()
+        self.copy_params()
         self.curr_modules = self.virtual_modules
-        return para_list
 
     def use_default(self):
-        self.curr_modules = self.deltaModules
+        self.curr_modules = self.delta_modules
 
     def forward(
         self,
@@ -3682,14 +3357,14 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.activation_fn(self.fc1(x))
 
             #add adapter input
-            if self.adapterConfig.adapter.exist:  #  'adapter' in sys.argv[-1]:
+            if self.adapter_config.adapter.exist:  #  'adapter' in sys.argv[-1]:
                 adapter_input = x
 
             x = self.dropout2(x)
             x = self.fc2(x)
 
             #add adapter input
-            if self.adapterConfig.adapter.houlsby.input:  #  'houlsby_input' in sys.argv[-1]:
+            if self.adapter_config.adapter.houlsby.input:  #  'houlsby_input' in sys.argv[-1]:
                 houlsby_input = x
 
             layer_result = x
@@ -3697,12 +3372,12 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.dropout3(x)
 
             ## 3374 remember NEED FIX!!!!!
-            if self.adapterConfig.adapter.exist:
-                if 'adapterbias' in self.adapterConfig.adapter.type:  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+            if self.adapter_config.adapter.exist:
+                if 'adapterbias' in self.adapter_config.adapter.type:  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
                     adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
                     x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
                     parallel_output = self.adapter_vector * self.adapter_alpha(residual)
-                if 'houlsby' in self.adapterConfig.adapter.type: # 'houlsby' in sys.argv[-1]:
+                if 'houlsby' in self.adapter_config.adapter.type: # 'houlsby' in sys.argv[-1]:
                     adapter_output = self.seq_adapter(houlsby_input)
                     x = x + residual # +  self.seq_adapter(houlsby_input)
                     parallel_output = self.parallel_adapter(parallel_input)
@@ -3710,53 +3385,16 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 x = x + residual
             
             if adapter_output is not None:
-                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
+                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapter_config.adapter.switch.path,:]
                 x = self.adapterswitch(adapterStack)
         else:
-            deltaModules = self.curr_modules
-            if self.adapterConfig.adapter.switch.stage == 1 and self.adapterswitch.training:
-                '''
-                multiPath = [
-                    delta(
-                        x, self, 
-                        self_attn_mask=self_attn_mask,
-                        self_attn_padding_mask=self_attn_padding_mask,
-                        need_weights=need_weights,
-                        att_args=att_args
-                    )[0] for delta in self.deltaModules
-                ] # Only take the layer output, instead of all the tuple return by the layer, to reduce memory consumption.
-                
-                adapterStack = torch.stack(multiPath, -2)
-                x = self.adapterswitch.forward_(adapterStack)
-                # x = self.final_layer_norm(x)
-                attn = self.deltaModules[self.adapterIdx['skip']].attn
-                layer_result = self.deltaModules[self.adapterIdx['skip']].layer_result
-                logging.warning(x.shape)
-                del adapterStack, multiPath# Free the memory
-                '''
-                '''
-                weights, maxIdx = self.adapterswitch(x)
-                res = self.deltaModules[maxIdx](x, 
-                                                self, 
-                                                self_attn_mask=self_attn_mask, 
-                                                self_attn_padding_mask=self_attn_padding_mask, 
-                                                need_weights=need_weights, 
-                                                att_args=att_args
-                                            )
-                x = weights[maxIdx] * \
-                    res[0]
-                
-                # logging.warning(x.shape)
-                attn = res[-1][0]  # self.deltaModules[self.adapterIdx['skip']].attn
-                layer_result = res[-1][1] # self.deltaModules[self.adapterIdx['skip']].layer_result
-                '''
-
-                weights, maxIdx = self.adapterswitch(x)
-                if (not self.adapterswitch.switch_logits.requires_grad and self.adapterConfig.adapter.switch.soft_train) or \
-                    (self.adapterswitch.switch_logits.requires_grad and self.adapterConfig.adapter.switch.soft_switch):
+            if self.adapter_config.adapter.switch.stage == 1 and self.adapterswitch.training:
+                weights, max_idx = self.adapterswitch()
+                if (not self.adapterswitch.switch_logits.requires_grad and self.adapter_config.adapter.switch.algo.soft_train) or \
+                    (self.adapterswitch.switch_logits.requires_grad and self.adapter_config.adapter.switch.algo.soft_switch):
                     # Linear combination of all path's output with their corresponding weights
                     all_x, all_layer_result = [], []
-                    for i, delta_module in enumerate(deltaModules):
+                    for i, delta_module in enumerate(self.curr_modules):
                         x_, (attn, layer_result_) = \
                             delta_module(
                                 x,
@@ -3773,10 +3411,10 @@ class TransformerSentenceEncoderLayer(nn.Module):
                     layer_result = torch.stack(all_layer_result, dim=-2)
                     del all_x, all_layer_result
 
-                    if self.adapterConfig.adapter.switch.strategy == 'global':
+                    if self.adapter_config.adapter.switch.strategy == 'global':
                         x = torch.einsum('ijkl,ik->ijl', x, weights)
                         layer_result = torch.einsum('ijkl,ik->ijl', layer_result, weights)
-                    elif self.adapterConfig.adapter.switch.strategy == 'seq_length':
+                    elif self.adapter_config.adapter.switch.strategy == 'seq_length':
                         x = torch.einsum('ijkl,ijk->ijl', x, weights)
                         layer_result = torch.einsum('ijkl,ijk->ijl', layer_result, weights)
                     else:
@@ -3785,7 +3423,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 else:
                     # One-Hot
                     res = \
-                        deltaModules[maxIdx](
+                        self.curr_modules[max_idx](
                             x,  
                             self, 
                             self_attn_mask=self_attn_mask, 
@@ -3793,13 +3431,13 @@ class TransformerSentenceEncoderLayer(nn.Module):
                             need_weights=need_weights, 
                             att_args=att_args
                         )
-                    x = weights[0][maxIdx] * res[0]
+                    x = weights[0][max_idx] * res[0]
                     
                     # logging.warning(x.shape)
-                    attn = res[-1][0]  # self.deltaModules[self.adapterIdx['skip']].attn
-                    layer_result = res[-1][1] # self.deltaModules[self.adapterIdx['skip']].layer_result
+                    attn = res[-1][0]  # self.delta_modules[self.adapter_idx['skip']].attn
+                    layer_result = res[-1][1] # self.delta_modules[self.adapter_idx['skip']].layer_result
             else:
-                x, (attn, layer_result) = deltaModules[self.adapterswitch.fixed_idx](
+                x, (attn, layer_result) = self.curr_modules[self.adapterswitch.fixed_idx](
                     x, self, 
                     self_attn_mask=self_attn_mask, 
                     self_attn_padding_mask=self_attn_padding_mask, 
@@ -3847,11 +3485,11 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.dropout3(x)
 
             # next line need to be fixed if we add adapterbias, adapter_output is overwritten.
-            if self.adapterConfig.adapter.exist and 'adapterbias' in self.adapterConfig.adapter.type:  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
+            if self.adapter_config.adapter.exist and 'adapterbias' in self.adapter_config.adapter.type:  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
                 adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
                 x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
                 parallel_output = self.adapter_vector * self.adapter_alpha(residual)
-            elif 'houlsby' in self.adapterConfig.adapter.type: # 'houlsby' in sys.argv[-1]:
+            elif 'houlsby' in self.adapter_config.adapter.type: # 'houlsby' in sys.argv[-1]:
                 adapter_output = self.seq_adapter(houlsby_input)
                 x = x + residual # +  self.seq_adapter(houlsby_input)
                 parallel_output = self.parallel_adapter(parallel_input)
@@ -3860,9 +3498,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
             
             if adapter_output is not None:
                 if self.use_lora:
-                    adapterStack = torch.stack([x + adapter_output, x, x + parallel_output, lora_output], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
+                    adapterStack = torch.stack([x + adapter_output, x, x + parallel_output, lora_output], -2)[:,:,self.adapter_config.adapter.switch.path,:]
                 else:
-                    adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapterConfig.adapter.switch.path,:]
+                    adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapter_config.adapter.switch.path,:]
                 x = self.adapterswitch(adapterStack)
             x = self.final_layer_norm(x)
 
@@ -3870,37 +3508,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
     def aux_loss(self):
         return self.adapterswitch.aux_loss()
-
-    def lora_forward(self, input=None, residual=None):
-        lora_x, lora_attn = input # lora_attn?
-        lora_x = self.dropout1(lora_x)
-        lora_x = residual + lora_x
-        lora_x = self.self_attn_layer_norm(lora_x)
-        lora_residual = lora_x
-        lora_x = self.activation_fn(self.fc1(lora_x))
-        lora_x = self.dropout2(lora_x)
-        lora_x = self.fc2(lora_x)
-        lora_x = self.dropout3(lora_x)
-        lora_out = lora_x + lora_residual
-        
-        return lora_out
-
-    def bitfit_forward(self, input=None, residual=None):
-        bitfit_x, bitfit_attn = input
-        bitfit_x = self.drouput1(bitfit_x)
-        bitfit_x = bitfit_x + residual
-        raise NotImplementedError
-
-    def lnfit_forward(self, input, residual=None):
-        lnfit_x = self.lnfit_attn_layer_norm(input)
-        lnfit_residual = lnfit_x
-        lnfit_x = self.activation_fn(self.fc1(lnfit_x))
-        lnfit_x = self.dropout2(lnfit_x)
-        lnfit_x = self.fc2(lnfit_x)
-        lnfit_x = self.dropout3(lnfit_x)
-        lnfit_output = lnfit_x + lnfit_residual
-        
-        return lnfit_output
+    
 
 @dataclass
 class AudioPretrainingConfig:

@@ -17,6 +17,7 @@ import logging
 from utility.helper import is_leader_process
 from dataclasses import dataclass, field
 from argparse import Namespace
+
 '''
 class Activation_Function_Class(nn.Module):
     """
@@ -594,47 +595,44 @@ class AdapterSwitch(nn.Module):
         super().__init__()
 
         self.config = config
-
-        if self.config.fair_darts:
-            logger.info('use Fair-DARTS')
-            assert self.config.soft_train and self.config.soft_switch, "Fair DARTS should use linear combination!"
-
         # Keep the logits of probabilities as a separate parameters.
         
         self.tau_setup()
         self.switch_temperature = ([self.config.tau.init_value - self.tau_step * self.config.tau.init_steps])
-        # self.hard = self.config.hard
         # Distribution used.
         self.gumbel = torch.distributions.Gumbel(0, 1)
         self.training = True
         self.paths = self.config.path
         self.layer_idx = layer_idx
 
-        if not self.config.fair_darts:
+        if self.config.algo.name not in ['fair_darts', 's3delta']:
             initial_logits = ([1. / len(self.paths)] * len(self.paths) if not (self.config.baseline) 
                             else [int(i == self.config.baseline[layer_idx]) for i in range(len(self.paths))])
         else:
             initial_logits = [0. for _ in range(len(self.paths))]
+            self.initial_logits = torch.sigmoid(torch.FloatTensor(initial_logits))
 
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.FloatTensor(initial_logits))
                 )
-        logger.info(f'initial_logits: {torch.sigmoid(self.switch_logits) if self.config.fair_darts else self.switch_logits}')
-        if self.config.fair_darts:
-            self.initial_logits = torch.sigmoid(torch.FloatTensor(initial_logits))
-
+        logger.info(f'initial_logits: {torch.sigmoid(self.switch_logits) if self.config.algo.name in ["fair_darts", "s3delta"] else self.switch_logits}')
         logger.info(f"paths = {len(initial_logits)}")
+
         self.prev_mode = None
         self.fixed_idx = len(initial_logits)
         self.used_adapter = used_adapter_name
-        self.gumbel_noise = None
+        # For algorithms sampling noise from GUmbel distribution
+        if self.config.algo.use_gumbel:
+            self.gumbel_noise = None
+        if self.config.algo.name == 's3delta':
+            self.p = 0.0
 
     @property
     def probs(self):
-        if not self.config.fair_darts:
+        if self.config.algo.name not in ['fair_darts', 's3delta']:
             return torch.softmax(self.switch_logits / self.switch_temperature[0], dim=-1)
-        # Fair-DARTS: Multi-Hop weights
-        return torch.sigmoid(self.switch_logits)
+        else:
+            return torch.sigmoid(self.switch_logits)
 
     def get_arch(self):
         return torch.argmax(self.switch_logits, dim=-1).item()
@@ -650,8 +648,9 @@ class AdapterSwitch(nn.Module):
         else:
             pass
             # self.fixed_idx = None
-        if self.config.fair_darts:
+        if self.config.algo.name in ['fair_darts', 's3delta']:
             self.initial_logits = self.initial_logits.to(self.switch_logits.device)
+        
         return super().train(mode)
 
     def switch_mode(self):
@@ -663,12 +662,12 @@ class AdapterSwitch(nn.Module):
         return self.prev_mode
     
     def aux_loss(self):
-        # Fair-DARTS: zero-one loss = -1/N * sum(sigmoid(alpha) - 0.5) * scaling_factor
-        if not self.config.fair_darts:
-            return 0
-        return -F.mse_loss(torch.sigmoid(self.switch_logits), self.initial_logits)
+        if self.config.algo.name == 'fair_darts':
+            # Fair-DARTS: zero-one loss = -1/N * sum(sigmoid(alpha) - 0.5) * scaling_factor
+            return -F.mse_loss(torch.sigmoid(self.switch_logits), self.initial_logits.to(self.switch_logits.device))
+        raise
 
-    def sample_gumble(self):
+    def sample_gumbel(self):
         batch_size = 1
         num_classes = (self.switch_logits.shape)[-1]
 
@@ -679,24 +678,27 @@ class AdapterSwitch(nn.Module):
         
         self.gumbel_noise =  self.gumbel.sample(sample_size).to(self.probs.device)
 
-    def forward(self, x):
+    def forward(self):
         self.switch_mode()
 
-        if self.config.algo.name == 'fair_darts':
+        if self.config.algo.name == 'darts':
+            weights = torch.softmax(self.switch_logits, dim=-1).unsqueeze(0)
+        elif self.config.algo.name == 'fair_darts':
             weights = torch.sigmoid(self.switch_logits).unsqueeze(0)
-        elif self.config.algo.name == 'darts':
-            weights = torch.softmax(self.switch_logits, dim=-1)
-        elif self.config.algo.name in ['gdas', 'gumbel-darts']:
+        elif self.config.algo_name == 's3delta':
+            # Zeta should be a tensor with the same shape of switch_logits
+            weights = torch.sigmoid(torch.log((self.gumbel_noise * self.p) / ((1 - self.gumbel_noise) * (1 - self.p))) / self.switch_temperature[0])
+        elif self.config.algo.name in ['gdas', 'gumbel_darts']:
             # Compute the weights of the convex sum.
             weights = torch.softmax((self.gumbel_noise + self.switch_logits) / self.switch_temperature[0], dim=-1)
             # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
-            if (self.switch_logits.requires_grad and not self.config.soft_switch) or \
-                (not self.switch_logits.requires_grad and not self.config.soft_train):
+            if (self.switch_logits.requires_grad and not self.config.algo.soft_switch) or \
+                (not self.switch_logits.requires_grad and not self.config.algo.soft_train):
                 y_hard = Gumbel.onehot_from_logits(weights)
                 weights = (y_hard - weights).detach() + weights
         else:
             raise NotImplementedError(f'{self.config.algo.name} did not implemented!')
-        
+
         return weights, torch.argmax(weights[0], dim=-1)
 
     def forward_at_branch_lora(self, x):
@@ -907,8 +909,6 @@ class PAdapter(nn.Module):
         x = parent.dropout2(x)
         x = parent.fc2(x)
         #
-        houlsby_input = x
-        #
         self.layer_result = x
 
         x = parent.dropout3(x)
@@ -991,7 +991,7 @@ class LoRAAdapter(nn.Module):
                     loraKey = name.split(loraName)[0] + loraName
                     parent, lastKey, child = find_module(parentModule, loraKey)
                     outdim, indim  = child.weight.shape
-                    addDict = ({'p': parent, 'k': f"arol_{lastKey}", 'm': quant_noise(lora.Linear(indim, outdim, r=8), parentModule.self_attn.q_noise, parentModule.self_attn.qn_block_size)})
+                    addDict = ({'p': parent, 'k': f"lora_{lastKey}", 'm': quant_noise(lora.Linear(indim, outdim, r=8), parentModule.self_attn.q_noise, parentModule.self_attn.qn_block_size)})
                     addDict['m'].weight = child.weight
                     addDict['m'].bias = child.bias
                     parent_refs.append(addDict)
@@ -1032,7 +1032,6 @@ class LoRAAdapter(nn.Module):
         lora_out = parent.dropout3(lora_out)
 
         lora_out = lora_out + residual
-        # return lora_out
         lora_out = parent.final_layer_norm(lora_out)
 
         return lora_out, (self.attn, self.layer_result)
@@ -1076,7 +1075,6 @@ class LNFitAdapter(nn.Module):
         lnfit_out = parent.dropout3(lnfit_out)
 
         lnfit_out = lnfit_out + residual
-
         lnfit_out = self.lnfit_final_layer_norm(lnfit_out)
 
         return lnfit_out, (self.attn, self.layer_result)
@@ -1189,7 +1187,6 @@ class BitFitAdapter(nn.Module):
         bitfit_out = parent.dropout3(bitfit_out)
 
         bitfit_out = bitfit_out + residual
-        # return bitfit_out
         bitfit_out = parent.final_layer_norm(bitfit_out) + parent.final_layer_norm.bitfit_bias
 
         return bitfit_out, (self.attn, self.layer_result)
@@ -1233,7 +1230,6 @@ class Skip(nn.Module):
         skip_out = parent.dropout3(skip_out)
 
         skip_out = skip_out + residual
-        # return skip_out
         skip_out = parent.final_layer_norm(skip_out)
 
         return skip_out, (skip_attn, layer_result)

@@ -95,11 +95,16 @@ class DownstreamExpert(nn.Module):
             output_class_num=self.datarc["num_speakers"],
             **self.modelrc,
         )
-        self.virtual_model = Model(
-            input_dim=self.upstream_dim,
-            output_class_num=self.datarc["num_speakers"],
-            **self.modelrc,
-        )
+        self.curr_model = self.model
+        if 'do_virtual' in kwargs and kwargs['do_virtual']:
+            self.virtual_model =  Model(
+                input_dim=self.upstream_dim,
+                output_class_num=self.datarc["num_speakers"],
+                **self.modelrc,
+            )
+            for virtual_p in self.virtual_model.parameters():
+                setattr(virtual_p, '__is_virtual__', True)
+        
         self.objective = pit_loss
 
         self.logging = os.path.join(expdir, "log.log")
@@ -155,14 +160,11 @@ class DownstreamExpert(nn.Module):
     """
 
     def copy_params(self):
-        # Store
         self.virtual_model.load_state_dict(self.model.state_dict())
-        return [self.virtual_model.parameters()]
 
     def use_virtual(self):
-        para_list = self.copy_params()
+        self.copy_params()
         self.curr_model = self.virtual_model
-        return para_list
         
     def use_default(self):
         self.curr_model = self.model
@@ -383,6 +385,7 @@ class DownstreamExpert(nn.Module):
         """
         wandb.define_metric("train-der", summary="min")
         wandb.define_metric("train-loss", summary="min")
+        wandb.define_metric("train-total_loss", summary="min")
         wandb.define_metric("dev-der", summary="min")
         wandb.define_metric("dev-loss", summary="min")
 

@@ -140,6 +140,7 @@ class Featurizer(nn.Module):
         upstream_device: str = "cuda",
         layer_selection: int = None,
         normalize: bool = False,
+        do_virtual: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -179,10 +180,12 @@ class Featurizer(nn.Module):
             )
             self.weights = nn.Parameter(torch.zeros(self.layer_num))
             self.norm_weights = torch.zeros(self.layer_num)
-            feature = self._weighted_sum([f.cpu() for f in feature])
-            # To store the old weights during replacement
-            self.virtual_weights = None
             self.curr_weights = self.weights
+            # To store the old weights during replacement
+            if do_virtual:
+                self.virtual_weights = nn.Parameter(torch.zeros(self.layer_num))
+                setattr(self.virtual_weights, '__is_virtual__', True)
+            feature = self._weighted_sum([f.cpu() for f in feature])
         else:
             feature = feature.cpu()
 
@@ -218,13 +221,15 @@ class Featurizer(nn.Module):
         return feature
     
     def copy_params(self):
-        self.virtual_weights = self.weights.clone()
-        return [self.virtual_weights.parameters()]
+        self.virtual_weights.data.copy_(self.weights.data)
 
     def use_virtual(self):
-        para_list = self.copy_params()
+        self.copy_params()
         self.curr_weights = self.virtual_weights
-        return para_list
+
+    @property
+    def get_norm_weights(self):
+        return self.norm_weights.detach()
 
     def use_default(self):
         self.curr_weights = self.weights

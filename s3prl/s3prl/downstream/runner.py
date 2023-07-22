@@ -150,15 +150,23 @@ class Runner():
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.init_steps}")
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.steps}, {self.adapter_config.adapter.switch.tau.stop_value}")
         
+        self.do_virtual = self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts'] \
+            and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order)
+        if self.do_virtual:
+            assert not (self.adapter_config.adapter.switch.algo.second_order and not self.adapter_config.adapter.switch.algo.first_order),\
+            "Second order should be calculated when first order is enable."
+
         self.upstream = self._get_upstream()
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
         self.all_entries = [self.upstream, self.featurizer, self.downstream]
+
+        # init wandb
         if is_leader_process():
             wandb.init(
                 project=f'{self.args.upstream}-{self.args.downstream}', 
                 mode="online" if self.args.online else "disabled", 
-                name=f'{int(self.args.stage1_ratio * 100)}% search, lr {self.config["optimizer"]["lr"]}'
+                name=f'{self.args.search_algo}, {int(self.args.stage1_ratio * 100)}% search, lr {self.config["optimizer"]["lr"]}'
             )
             newArg = self.args
             newArg.config = self.config
@@ -201,8 +209,8 @@ class Runner():
                         
                         model_dict = model.state_dict()
                         for para, value in upstream_weight.items():
-                            if any(delta_module in para for delta_module in ['adapter', 'lora', 'lnfit', 'bitfit']):#'adapter' in para:
-                                if 'switch' in para and self.adapter_config.adapter.switch.baseline:
+                            if getattr(value, '__is_delta__', False) or getattr(value, '__is_switch__', False):
+                                if getattr(value, '__is_switch__', False) and self.adapter_config.adapter.switch.baseline:
                                     continue
                                 model_dict.update({para: value})
                         model.load_state_dict(model_dict)
@@ -293,7 +301,17 @@ class Runner():
             model = model,
             name = 'Upstream',
             trainable = self.args.upstream_trainable,
-            interfaces = ["get_downsample_rates"]
+            interfaces = [
+                "get_downsample_rates", 
+                "reduce_tau", 
+                "sample_gumbel", 
+                "aux_loss", 
+                "set_stage", 
+                "use_virtual", 
+                "use_default",
+                "get_layers",
+                "get_named_parameters"
+            ]
         )
 
 
@@ -304,13 +322,14 @@ class Runner():
             layer_selection = self.args.upstream_layer_selection,
             upstream_device = self.args.device,
             normalize = self.args.upstream_feature_normalize,
+            do_virtual = self.do_virtual
         ).to(self.args.device)
 
         return self._init_model(
             model = model,
             name = 'Featurizer',
             trainable = True,
-            interfaces = ['output_dim', 'downsample_rate']
+            interfaces = ['output_dim', 'downsample_rate', 'use_virtual', 'use_default', 'get_norm_weights']
         )
 
 
@@ -323,15 +342,15 @@ class Runner():
             upstream_rate = self.featurizer.model.downsample_rate,
             **self.config,
             **vars(self.args),
-            adapterConfig = self.adapter_config
+            adapterConfig = self.adapter_config,
+            do_virtual = self.do_virtual
         ).to(self.args.device)
-        # model.adapterConfig = self.adapter_config
 
         return self._init_model(
             model = model,
             name = 'Downstream',
             trainable = True,
-            interfaces = ['get_dataloader', 'log_records']
+            interfaces = ['get_dataloader', 'log_records', 'use_virtual', 'use_default']
         )
 
     ### add prompt
@@ -370,27 +389,47 @@ class Runner():
     def fetch_dataloader(self, mode: str):
         return self.downstream.model.get_dataloader(mode)
 
-    def prepare_stage(self, stage: int):
-        if isinstance(self.upstream.model, DDP):
-            self.upstream.model.module.model.set_stage(stage)
-        else:
-            self.upstream.model.model.set_stage(stage)
+    def prepare_dataloader(self, train_split, adapterModes, epoch):
+        try:
+            dataloaders = self.downstream.model.get_dataloader(train_split, epoch=epoch)
+        except TypeError as e:
+            if "unexpected keyword argument 'epoch'" in str(e):
+                try:
+                    dataloaders = self.downstream.model.get_dataloader(train_split)
+                    for adapterMode in adapterModes:
+                        if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
+                            dataloaders[adapterMode].sampler.set_epoch(epoch[adapterMode])
+                except:
+                    raise
+            else:
+                raise
+        # Log dataset info
+        for adapterMode in adapterModes:
+            if dataloaders[adapterMode]:
+                linelogger.info(f'dataset size of {adapterMode}: {len(dataloaders[adapterMode].dataset)}')
+                linelogger.info(f'data loader size of {adapterMode}: {len(dataloaders[adapterMode])}')
+                linelogger.info(f'dataset # indice of {adapterMode}: {len(dataloaders[adapterMode].dataset.indices)}')
+        
+        if dataloaders['switch']:
+            linelogger.info(f'dataset overlap: {len(set(dataloaders["train"].dataset.indices) & set(dataloaders["switch"].dataset.indices))}')
 
-        # self.upstream.model.model.set_stage(stage)
+        iters = {adapterMode: iter(dataloaders[adapterMode]) for adapterMode in adapterModes}
+        
+        return dataloaders, iters
+
+    def prepare_stage(self, stage: int):
+        self.upstream.model.set_stage(stage)
         for entry in self.all_entries:
             if self.args.adapter != False and entry.name == "Upstream":
                 for name, param in entry.model.named_parameters():
-                    if any(delta_module in name for delta_module in ['adapter', 'lora', 'bitfit', 'lnfit']):#"adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
+                    if getattr(param, '__is_delta__', False):#"adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
                         param.requires_grad = True
                     else:
                         param.requires_grad = False
             if entry.name == "Featurizer":
                 for name, param in entry.model.named_parameters():
-                    param.requires_grad = (stage == 1 and self.args.stage1_weighted_sum) \
-                                            or (stage == 2 and self.args.stage2_weighted_sum) \
-                                                or (self.args.f_lr and stage >= self.args.f_lr_stage)
+                    param.requires_grad = (self.args.f_lr and stage >= self.args.f_lr_stage)
         if stage == 1:
-            # if not self.args.stage1_weighted_sum:
             if not self.args.f_lr or self.args.f_lr_stage == 2:
                 self.featurizer.model.eval()
             else:
@@ -411,7 +450,7 @@ class Runner():
         trainable_w_paras = []
         # Architecture weights (switch)
         trainable_a_paras = []
-        # Virtual paras (for DARTS-based algo that are not using first-order approximation)
+        # Virtual paras (for DARTS-based algorithm that are not using first-order approximation)
         trainable_v_paras = []
 
         additional_weight = [] # add prompt paras to optimizer
@@ -432,21 +471,26 @@ class Runner():
             if self.args.adapter != None and entry.name == "Upstream":
                 adapter_param = 0
                 for name, param in entry.model.named_parameters():
-                    if any(delta_module in name for delta_module in ['adapter', 'lora', 'bitfit', 'lnfit']):
-                        if 'switch' in name:
-                            trainable_a_paras.append(param)
-                        else:
-                            trainable_w_paras.append(param)
-                            adapter_param += param.nelement() 
+                    if getattr(param, '__is_delta__', False):
+                        trainable_w_paras.append(param)
+                        param.requires_grad = True
+                        adapter_param += param.nelement()
+                    elif getattr(param, '__is_virtual__', False):
+                        trainable_v_paras.append(param)
+                        param.requires_grad = True
+                    elif getattr(param, '__is_switch__', False):
+                        trainable_a_paras.append(param)
                         param.requires_grad = True
                     else:
                         param.requires_grad = False
-                    
                 trainable_paras += list(additional_weight)
                 linelogger.info("Numbers of adapter PARAMETER: %.2fM" % (adapter_param/1e6))
             elif entry.trainable:
-                linelogger.info(f"append weights: {entry.name}, {len(list(entry.model.parameters()))}")
-                trainable_w_paras += list(entry.model.parameters())
+                for n, p in entry.model.named_parameters():
+                    if getattr(p, '__is_virtual__', False):
+                        trainable_v_paras.append(p)
+                    else:
+                        trainable_w_paras.append(p)
             else:
                 linelogger.info(f'in eval: {entry.name}')
                 entry.model.eval()
@@ -454,10 +498,17 @@ class Runner():
         # optimizer
         w_optimizer = self._get_optimizer(trainable_w_paras, 'w_optimizer', [])
         a_optimizer = self._get_optimizer(trainable_a_paras, 'a_optimizer', [])
-        v_optimizer = self._get_optimizer(trainable_v_paras, 'v_optimizer', [])
+        v_optimizer = self._get_optimizer(trainable_v_paras, 'v_optimizer', []) if len(trainable_v_paras) else None
+
+        # Make switch_logit's grad equals to zero tensor, rather than None
+        with torch.no_grad():
+            for p in trainable_a_paras:
+                p.grad = torch.zeros_like(p.data)
         
         # scheduler
         scheduler = None
+        if self.config.get('scheduler'):
+            scheduler = self._get_scheduler(w_optimizer)
 
         # specaug
         specaug = None
@@ -484,63 +535,30 @@ class Runner():
         train_split = self.config['runner'].get("train_dataloader", "train")
 
         linelogger.info(f'train stage for {self.stage1_steps} steps')
-        if len(self.adapter_config.adapter.switch.path) > 1 and not self.adapter_config.adapter.switch.baseline:
-            # Do search
-            adapterModes = ['switch', 'train'] if self.adapter_config.switch.algo in ['gdas'] else ['train', 'switch']
+        if len(self.adapter_config.adapter.switch.path) > 1 and not self.adapter_config.adapter.switch.baseline:    # Do search
+            adapterModes = ['train', 'switch'] if self.adapter_config.adapter.switch.algo.name in ['gdas'] else ['switch', 'train']
         else:
             adapterModes = ['train'] 
         
         # Log initial tau, switch logits & norm_weight to wandb
         if is_leader_process() and self.args.online:
-            if isinstance(self.upstream.model, DDP):
-                layers, norm_weights = self.upstream.model.module.model.encoder.layers, self.featurizer.model.module.norm_weights.detach()
-            else:
-                layers, norm_weights = self.upstream.model.model.encoder.layers, self.featurizer.model.norm_weights.detach()
-            results = {}
-            for i, layer in enumerate(layers):
-                for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
-                    results.update({f"layer_{i}/{train_split}_{layer.used_adapter[j]}": logit.item()})
-                results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
-            
-            for i, weight in enumerate(norm_weights):
-                results.update({f"{train_split}_norm_weights_{i}": weight})
+            layers, norm_weights = self.upstream.model.get_layers, self.featurizer.model.get_norm_weights
+            self.downstream.model.log_records(
+                train_split,
+                records = records,
+                logger = logger,
+                global_step = pbar.n,
+                batch_ids = batch_ids,
+                total_batch_num = 0,
+                layers = layers,
+                norm_weights = norm_weights,
+                lr = scheduler.get_last_lr()[0] if scheduler else 0,
+                to_wandb = self.args.online
+            )
 
-            if scheduler:
-                results.update({"lr": scheduler.get_last_lr()[0]})
-            wandb.log(results, step=pbar.n)
-            del results
-
-        linelogger.info(f"gradient accumulate steps: {self.config['runner'].get('gradient_accumulate_steps')}")
         self.prepare_stage(self.stage)
-        try:
-            dataloaders = self.downstream.model.get_dataloader(train_split, epoch=epoch)
-        except TypeError as e:
-            if "unexpected keyword argument 'epoch'" in str(e):
-                try:
-                    dataloaders = self.downstream.model.get_dataloader(train_split)
-                    for adapterMode in adapterModes:
-                        if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
-                            dataloaders[adapterMode].sampler.set_epoch(epoch[adapterMode])
-                except:
-                    raise
-            else:
-                raise
+        dataloaders, iters = self.prepare_dataloader(train_split, adapterModes, epoch)
 
-        for adapterMode in adapterModes:
-            if dataloaders[adapterMode]:
-                linelogger.info(f'dataset size of {adapterMode}: {len(dataloaders[adapterMode].dataset)}')
-                linelogger.info(f'data loader size of {adapterMode}: {len(dataloaders[adapterMode])}')
-                linelogger.info(f'dataset # indice of {adapterMode}: {len(dataloaders[adapterMode].dataset.indices)}')
-        if dataloaders['switch']:
-            linelogger.info(f'dataset overlap: {len(set(dataloaders["train"].dataset.indices) & set(dataloaders["switch"].dataset.indices))}')
-
-        input_modes, cur_step, iters = {}, {}, {}
-        for adapterMode in adapterModes:
-            if dataloaders[adapterMode]:
-                input_modes[adapterMode] = None
-                cur_step[adapterMode] = 0
-                iters[adapterMode] = iter(dataloaders[adapterMode])
-            
         self.stage_steps_prefix = [self.stage1_steps, self.config['runner']['total_steps']]
         gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
         while pbar.n < self.config['runner']['total_steps']:
@@ -549,32 +567,14 @@ class Runner():
                 self.stage = 2
                 adapterModes = ['train']
                 delta_step = self.stage1_steps * 2 - pbar.n 
-                inner_pbar.close()
-                try:
-                    dataloaders = self.downstream.model.get_dataloader(train_split, epoch=epoch['train'])
-                except TypeError as e:
-                    if "unexpected keyword argument 'epoch'" in str(e):
-                        try:
-                            dataloaders = self.downstream.model.get_dataloader(train_split)
-                            for adapterMode in adapterModes:
-                                if hasattr(dataloaders[adapterMode], "sampler") and isinstance(dataloaders[adapterMode].sampler, DistributedSampler):
-                                    dataloaders[adapterMode].sampler.set_epoch(epoch[adapterMode])
-                                iters[adapterMode] = iter(dataloaders[adapterMode])
-                        except:
-                            raise
-                    else:
-                        raise
-                for adapterMode in adapterModes:
-                    if dataloaders[adapterMode]:
-                        linelogger.info(f'dataset size of {adapterMode}: {len(dataloaders[adapterMode].dataset)}')
-                        linelogger.info(f'data loader size of {adapterMode}: {len(dataloaders[adapterMode])}')
-                        linelogger.info(f'dataset # indice of {adapterMode}: {len(dataloaders[adapterMode].dataset.indices)}')
+                self.inner_pbar.close()
+                dataloaders, iters = self.prepare_dataloader(train_split, adapterModes, epoch)
                 
             batch_id = -1 # set to -1 so that the first batch's batch_id will be zero.
-            inner_pbar = tqdm(total=len(dataloaders['train']), dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
+            self.inner_pbar = tqdm(total=len(dataloaders['train']), dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
             while pbar.n < self.stage_steps_prefix[self.stage - 1]:
                 # Collect data
-                all_data = defaultdict(list(dict))
+                all_data = defaultdict(list)
                 for adapterMode in adapterModes:
                     for i in range(gradient_accumulate_steps):
                         try:
@@ -586,9 +586,9 @@ class Runner():
                             
                             iters[adapterMode] = iter(dataloaders[adapterMode])
                             (wavs, *others) = next(iters[adapterMode])
-                    all_data[adapterMode].append({'wavs': wavs, 'others': others})
+                        all_data[adapterMode].append({'wavs': wavs, 'others': others})
                 # start training
-                for a_id, adapterMode in enumerate(adapterModes):
+                for mode_id, adapterMode in enumerate(adapterModes):
                     assert(not (adapterMode == 'switch' and self.stage == 2))
                     
                     if self.stage < 2:
@@ -596,48 +596,49 @@ class Runner():
                             param.requires_grad = (adapterMode == 'train')
                         for param in trainable_a_paras:
                             param.requires_grad = (adapterMode == 'switch')
+                        for param in trainable_v_paras:
+                            param.requires_grad = (adapterMode == 'switch')
 
-                    global_step = pbar.n * (1 + (self.stage == 1)) + (1 + a_id) + delta_step * (self.stage == 2)
+                    global_step = pbar.n * (1 + (self.stage == 1)) + (1 + mode_id) + delta_step * (self.stage == 2)
 
                     if adapterMode == 'train':
                         curr_bids, last_bid = \
                             self.train_weight(
-                                gradient_accumulate_steps=gradient_accumulate_steps,
-                                w_optim=w_optimizer,
-                                trainable_w_paras=trainable_w_paras,
-                                scheduler=scheduler,
-                                global_step=global_step,
-                                batch_id=batch_id,
-                                train_split=train_split,
-                                records=records,
-                                inner_pbar=inner_pbar,
-                                specaug=specaug
+                                data = all_data[adapterMode],
+                                train_split = train_split,
+                                batch_id = batch_id,
+                                w_optim = w_optimizer,
+                                scheduler = scheduler,
+                                trainable_w_paras = trainable_w_paras,
+                                global_step = global_step,
+                                gradient_accumulate_steps = gradient_accumulate_steps,
+                                tqdm_file = tqdm_file,
+                                records = records,
+                                specaug = specaug
                             )
                     else:
                         curr_bids, last_bid = \
                             self.train_arch(
-                                gradient_accumulate_step=gradient_accumulate_steps,
-                                input_data=all_data,
-                                w_optim=w_optimizer,
-                                a_optim=a_optimizer,
-                                v_optim=v_optimizer,
-                                trainable_w_paras=trainable_w_paras,
-                                trainable_a_paras=trainable_a_paras,
-                                trainable_v_paras=trainable_v_paras,
-                                global_step=global_step,
-                                train_split=train_split,
-                                records=records,
-                                specaug=specaug
+                                input_data = all_data,
+                                train_split = train_split,
+                                batch_id = batch_id,
+                                w_optim = w_optimizer,
+                                a_optim = a_optimizer,
+                                v_optim = v_optimizer,
+                                trainable_w_paras = trainable_w_paras,
+                                trainable_a_paras = trainable_a_paras,
+                                trainable_v_paras = trainable_v_paras,
+                                global_step = global_step,
+                                gradient_accumulate_steps = gradient_accumulate_steps,
+                                records = records,
+                                specaug = specaug
                             )
                     
                     batch_ids += curr_bids
                     batch_id = last_bid
 
-                if self.stage < 2:
-                    if isinstance(self.upstream.model, DDP):
-                        self.upstream.model.module.model.reduce_tau()
-                    else:
-                        self.upstream.model.model.reduce_tau()
+                if self.stage < 2 and self.adapter_config.adapter.switch.tau.type != "const":
+                    self.upstream.model.reduce_tau()
                 
                 pbar.update(1)
                 
@@ -648,10 +649,7 @@ class Runner():
 
                 # logging
                 if global_step % self.config['runner']['log_step'] == 0:
-                    if isinstance(self.upstream.model, DDP):
-                        layers, norm_weights = self.upstream.model.module.model.encoder.layers, self.featurizer.model.module.norm_weights.detach()
-                    else:
-                        layers, norm_weights = self.upstream.model.model.encoder.layers, self.featurizer.model.norm_weights.detach()
+                    layers, norm_weights = self.upstream.model.get_layers, self.featurizer.model.get_norm_weights
                     self.downstream.model.log_records(
                         train_split,
                         records = records,
@@ -691,7 +689,7 @@ class Runner():
                         'Optimizer': {
                             "w_optimizer": w_optimizer.state_dict(), 
                             "a_optimizer": a_optimizer.state_dict(),
-                            "v_optimizer": v_optimizer.state_dict()
+                            "v_optimizer": v_optimizer.state_dict() if v_optimizer else None
                         },
                         'Step': global_step,
                         'Epoch': epoch,
@@ -711,13 +709,10 @@ class Runner():
                             all_states["prompt"] = prompt_state
                         
                         if self.args.adapter and entry.name == "Upstream":
-                            if isinstance(entry.model, DDP):
-                                named_paras = entry.model.module.named_parameters()
-                            else:
-                                named_paras = entry.model.named_parameters()
+                            named_paras = entry.model.get_named_parameters
                             adapter_state = {}
                             for name, param in named_paras:
-                                if any(delta_module in name for delta_module in ['adapter', 'lora', 'bitfit', 'lnfit']):
+                                if getattr(param, '__is_delta__', False) or getattr(param, '__is_switch__', False):
                                     adapter_state[name] = param
                             all_states["adapter"] = adapter_state
 
@@ -735,7 +730,7 @@ class Runner():
                     del all_states
       
         pbar.close()
-        inner_pbar.close()
+        self.inner_pbar.close()
 
         if self.args.push_to_hf_hub:
             self.push_to_huggingface_hub()
@@ -763,10 +758,19 @@ class Runner():
 
         return loss
 
+    def use_virtual(self):
+        for entry in self.all_entries:
+            entry.model.use_virtual()
+
+    def use_default(self):
+        for entry in self.all_entries:
+            entry.model.use_default()
+
     def train_arch(
             self,
-            gradient_accumulate_step = 1,
-            input_data = dict(list(dict)),
+            input_data = {},
+            train_split = None,
+            batch_id = 0,
             w_optim = None,
             a_optim = None,
             v_optim = None,
@@ -774,59 +778,98 @@ class Runner():
             trainable_a_paras = [],
             trainable_v_paras = [],
             global_step = 0,
-            train_split = None,
+            gradient_accumulate_steps = 1,
             records = defaultdict(list),
             specaug = None
         ):
+        batch_ids = []
+        if self.adapter_config.adapter.switch.algo.use_gumbel and self.stage < 2:
+            self.upstream.model.sample_gumbel()
         try:
-            do_virtual = (self.adapter_config.switch.algo.name in ['darts', 'fair-darts', 'gumbel-darts'] and \
-                not self.adapter_config.switch.algo.first_order_approx)
-            if do_virtual:
+            if self.do_virtual:
                 v_optim.load_state_dict(w_optim.state_dict())
-                for entry in self.all_entries:
-                    entry.model.use_virtual(return_para=False)
+                self.use_virtual()
                 # calculate virtual loss on virtual model for one step
-                for i in range(gradient_accumulate_step):
-                    v_loss = self.model_forward(input_data['train'][i], train_split, records, specaug)
-                    (v_loss / gradient_accumulate_step).backward()
+                v_records = defaultdict(list)
+                
+                for p in trainable_a_paras:
+                    p.requires_grad = False
+                
+                for i in range(gradient_accumulate_steps):
+                    v_loss = self.model_forward(input_data['train'][i], train_split, v_records, specaug)
+                    (v_loss / gradient_accumulate_steps).backward()
                     del v_loss
+                
                 # update vitrual parameters
                 v_optim.step()
                 v_optim.zero_grad()
 
-                # calculate architecture loss using virtual_model with current architecture weight 
-                # ToDo: Sampling problem
+                # calculate architecture loss using virtual_model with current architecture weight
+                for p in trainable_a_paras:
+                    p.requires_grad = True
+                
                 all_dalpha = []
                 all_dw = []
-                for i in range(gradient_accumulate_step):
+                curr_trainable_parameters = trainable_a_paras + trainable_v_paras if self.adapter_config.adapter.switch.algo.second_order else trainable_a_paras
+                for i in range(gradient_accumulate_steps):
                     a_loss = self.model_forward(input_data['switch'][i], train_split, records, specaug)
                     grad = torch.autograd.grad(
-                        a_loss, trainable_a_paras + trainable_v_paras, allow_unused=True
+                        (a_loss/ gradient_accumulate_steps), curr_trainable_parameters, allow_unused=True
                     )
                     del a_loss
+                    
                     all_dalpha.append(grad[:len(trainable_a_paras)])
-                    all_dw.append(grad[len(trainable_v_paras):])
+                    if self.adapter_config.adapter.switch.algo.second_order:
+                        all_dw.append(grad[len(trainable_a_paras):])
 
-                for entry in self.all_entries:
-                    entry.model.use_default()
+                    batch_id += 1
+                    batch_ids.append(batch_id)
 
-                # compute the higher-order derivatives
-                all_hessian = self.compute_hessian(trainable_w_paras, trainable_a_paras, dw, input_data['train'], train_split, gradient_accumulate_step, records, specaug)
-                with torch.no_grad():
-                    for dalpha, dw, hessian in zip(all_dalpha, all_dw, all_hessian):
-                            for alpha, da, h in zip(trainable_a_paras, dalpha, hessian):
-                                alpha.grad += da - w_optim.param_groups[0]['lr'] * h
+                self.use_default()
+
+                summed_dalpha = []
+                for dalpha in zip(*all_dalpha):
+                    summed_da = torch.zeros_like(dalpha[0])
+                    for da in dalpha:
+                        summed_da += da
+                    summed_dalpha.append(summed_da)
+                
+                if self.adapter_config.adapter.switch.algo.second_order:
+                    summed_dw = []
+                    for dw in zip(*all_dw):
+                        summed_w = torch.zeros_like(dw[0])
+                        for w in dw:
+                            summed_w += w
+                        summed_dw.append(summed_w)
+                    # compute the higher-order derivatives
+                    all_hessian = self.compute_hessian(trainable_w_paras, trainable_a_paras, summed_dw, input_data['train'], train_split, gradient_accumulate_steps, specaug)
+                    with torch.no_grad():
+                        for alpha, dalpha, hessian in zip(trainable_a_paras, summed_dalpha, all_hessian):
+                            alpha.grad = dalpha - w_optim.param_groups[0]['lr'] * hessian
+                else:
+                    # First order approximation
+                    with torch.no_grad():
+                        for alpha, dalpha in zip(trainable_a_paras, summed_dalpha):
+                            alpha.grad = dalpha
             else:
                 # normal forward
-                for i in range(gradient_accumulate_step):
+                for i in range(gradient_accumulate_steps):
                     loss = self.model_forward(input_data['switch'][i], train_split, records, specaug)
-                    (loss / gradient_accumulate_step).backward()
+                    (loss / gradient_accumulate_steps).backward()
                     del loss
+
+                    batch_id += 1
+                    batch_ids.append(batch_id)
                 
         except RuntimeError as e:
             if 'CUDA out of memory' in str(e):
                 linelogger.info(f'[Runner] - CUDA out of memory at step {global_step}')
             raise
+        
+        if self.adapter_config.adapter.switch.algo.name == 'fair_darts':
+            aux_loss = self.upstream.model.aux_loss() * self.adapter_config.adapter.switch.algo.aux_loss_ratio
+            aux_loss.backward()
+            del aux_loss
 
         # gradient clipping
         grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -840,15 +883,16 @@ class Runner():
             a_optim.step()
             a_optim.zero_grad()
 
+        return batch_ids, batch_id
+
     def compute_hessian(
             self, 
             trainable_w_paras, 
             trainable_a_paras, 
-            dw, 
-            train_data: list(dict),
+            dw,
+            train_data,
             train_split,
-            gradient_accumulate_steps: int,
-            records: defaultdict(list),
+            gradient_accumulate_steps,
             specaug
         ):
         """
@@ -858,6 +902,7 @@ class Runner():
         hessian = (dalpha { L_trn(w+, alpha) } - dalpha { L_trn(w-, alpha) }) / (2*eps)
         eps = 0.01 / ||dw||
         """
+        original_w_paras = deepcopy(trainable_w_paras)
         norm = torch.cat([w.view(-1) for w in dw if w is not None]).norm()
         if norm == 0:
             print('norm is zero')
@@ -868,73 +913,86 @@ class Runner():
             for p, d in zip(trainable_w_paras, dw):
                 if d is not None:
                     p += eps * d
+
         all_dalpha_pos = []
+        records = defaultdict(list)
         for i in range(gradient_accumulate_steps):
             loss1 = self.model_forward(train_data[i], train_split, records, specaug)
             all_dalpha_pos.append(
-                torch.autograd.grad(loss1, trainable_a_paras)
+                torch.autograd.grad(loss1 / gradient_accumulate_steps, trainable_a_paras)
             )  # dalpha { L_trn(w+) }
             del loss1
 
         # w- = w - eps*dw`
         with torch.no_grad():
-            for p, d in zip(trainable_w_paras, dw):
+            for p, op, d in zip(trainable_w_paras, original_w_paras, dw):
+                p.data.copy_(op.data)
                 if d is not None:
-                    p -= 2. * eps * d
-        
+                    p -= eps * d
+    
         all_dalpha_neg = []
         for i in range(gradient_accumulate_steps):
             loss2 = self.model_forward(train_data[i], train_split, records, specaug)
             all_dalpha_neg.append(
-                torch.autograd.grad(loss2, trainable_a_paras)
+                torch.autograd.grad(loss2 / gradient_accumulate_steps, trainable_a_paras)
             )  # dalpha { L_trn(w-) }
             del loss2
 
         # recover w
         with torch.no_grad():
-            for p, d in zip(trainable_w_paras, dw):
-                if d is not None:
-                    p += eps * d
+            for p, op in zip(trainable_w_paras, original_w_paras):
+                p.data.copy_(op.data)
+
+        del original_w_paras
 
         hessian = [
-            [(p-n) / (2.*eps) for p, n in zip(dalpha_pos, dalpha_neg)]
+            [(p-n) / (2*eps) for p, n in zip(dalpha_pos, dalpha_neg)]
                 for dalpha_pos, dalpha_neg in zip(all_dalpha_pos, all_dalpha_neg)
         ]
-        return hessian
+
+        result = []
+        for h in zip(*hessian):
+            summed_h = torch.zeros_like(h[0])
+            for h_ in h:
+                summed_h += h_
+            result.append(summed_h)
+        
+        return result
 
     def train_weight(
             self,
-            gradient_accumulate_steps = 1,
-            data = list(dict),
-            w_optim = None,
-            trainable_w_paras = [],
-            scheduler = None,
-            global_step = 0,
-            batch_id = 0,
+            data = None,
             train_split = None,
+            batch_id = 0,
+            w_optim = None,
+            scheduler = None,
+            trainable_w_paras = [],
+            global_step = 0,
+            gradient_accumulate_steps = 1,
+            tqdm_file = None,
             records = defaultdict(list),
-            inner_pbar = None,
             specaug = None
         ):
-        # ToDo: Samping
         try:
             batch_ids = []
+            if self.adapter_config.adapter.switch.algo.use_gumbel and self.stage < 2:
+                    self.upstream.model.sample_gumbel()
             for i in range(gradient_accumulate_steps):
                 loss = self.model_forward(data[i], train_split, records, specaug)
 
                 batch_id += 1
-                batch_ids.append(batch_id * (3 - self.stage))
+                batch_ids.append(batch_id)
 
                 (loss / gradient_accumulate_steps).backward()
-                del loss, wavs, others, features
+                del loss
 
                 # Update progress bar
-                inner_pbar.update(1)
-                if inner_pbar.n == inner_pbar.total:
-                    total = inner_pbar.total
-                    inner_pbar.close()
-                    inner_pbar = tqdm(total=total, dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
-                    batch_id = 0
+                self.inner_pbar.update(1)
+                if self.inner_pbar.n == self.inner_pbar.total:
+                    total = self.inner_pbar.total
+                    self.inner_pbar.close()
+                    self.inner_pbar = tqdm(total=total, dynamic_ncols=True, desc=f'train_stage{self.stage}', file=tqdm_file)
+                    batch_id = -1
 
         except RuntimeError as e:
             if 'CUDA out of memory' in str(e):

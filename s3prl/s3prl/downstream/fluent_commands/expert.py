@@ -51,6 +51,19 @@ class DownstreamExpert(nn.Module):
             output_dim = sum(self.values_per_slot),
             **model_conf,
         )
+        self.curr_projector = self.projector
+        self.curr_model = self.model
+        if 'do_virtual' in kwargs and kwargs['do_virtual']:
+            self.virtual_projector = nn.Linear(upstream_dim, self.modelrc['projector_dim'])
+            self.virtual_model = model_cls(
+                input_dim = self.modelrc['projector_dim'],
+                output_dim = sum(self.values_per_slot),
+                **model_conf,
+            )
+            for virtual_p in self.virtual_projector.parameters():
+                setattr(virtual_p, '__is_virtual__', True)
+            for virtual_p in self.virtual_model.parameters():
+                setattr(virtual_p, '__is_virtual__', True)
         self.objective = nn.CrossEntropyLoss()
         self.expdir = expdir
         self.register_buffer('best_score', torch.zeros(1))
@@ -112,6 +125,22 @@ class DownstreamExpert(nn.Module):
         return self._get_eval_dataloader(self.test_dataset)
 
     # Interface
+    def copy_params(self):
+        self.virtual_projector.load_state_dict(self.projector.state_dict())
+        self.virtual_model.load_state_dict(self.model.state_dict())
+
+    # Interface
+    def use_virtual(self):
+        self.copy_params()
+        self.curr_projector = self.virtual_projector
+        self.curr_model = self.virtual_model
+        
+    # Interface
+    def use_default(self):
+        self.curr_projector = self.projector
+        self.curr_model = self.model
+
+    # Interface
     def get_dataloader(self, mode, epoch=None, **kwargs):
         if mode == 'train':
             switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1)
@@ -128,8 +157,8 @@ class DownstreamExpert(nn.Module):
         features_len = torch.IntTensor([len(feat) for feat in features]).to(device=features[0].device)
         features = pad_sequence(features, batch_first=True)
 
-        features = self.projector(features)
-        intent_logits, _ = self.model(features, features_len)
+        features = self.curr_projector(features)
+        intent_logits, _ = self.curr_model(features, features_len)
 
         intent_loss = 0
         start_index = 0
@@ -171,6 +200,8 @@ class DownstreamExpert(nn.Module):
         wandb.define_metric("dev-intent_loss", summary="min")
         wandb.define_metric("train-acc", summary="max")
         wandb.define_metric("train-intent_loss", summary="min")
+        wandb.define_metric("train-total_loss", summary="min")
+
         results = {}
         key_prefix = f"{mode}"
         if 'layers' in kwargs:
@@ -202,6 +233,20 @@ class DownstreamExpert(nn.Module):
                         self.best_score = torch.ones(1).to(self.best_score.device) * average
                         f.write(f'New best on {mode} at step {global_step}: {average}\n')
                         save_names.append(f'{mode}-best.ckpt')
+
+        if mode == 'train': 
+            average_aux_loss = torch.FloatTensor(records['aux_loss']).mean().item() if len(records['aux_loss']) > 0 else 0
+            logger.add_scalar(
+                f'fluent_commands/{mode}-aux_loss', average_aux_loss, global_step=global_step
+            )
+            results.update({f'{mode}-aux_loss': average_aux_loss})
+            #print(f'aux_loss {average_aux_loss}')
+
+            total_loss = results['intent_loss'] + average_aux_loss
+            logger.add_scalar(
+                f'fluent_commands/{mode}-total_loss', total_loss, global_step=global_step
+            )
+            results.update({f'{mode}-total_loss': total_loss})
 
         wandb.log(results, step=global_step)
 

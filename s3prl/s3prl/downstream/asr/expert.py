@@ -91,6 +91,22 @@ class DownstreamExpert(nn.Module):
             upstream_rate,
             **model_conf,
         )
+
+        self.curr_projector = self.projector
+        self.curr_model = self.model
+        if 'do_virtual' in kwargs and kwargs['do_virtual']:
+            self.virtual_projector = nn.Linear(upstream_dim, self.modelrc["project_dim"])
+            self.virtual_model = model_cls(
+                self.modelrc['project_dim'],
+                len(self.dictionary.symbols),
+                upstream_rate,
+                **model_conf,
+            )
+            for virtual_p in self.virtual_projector.parameters():
+                setattr(virtual_p, '__is_virtual__', True)
+            for virtual_p in self.virtual_model.parameters():
+                setattr(virtual_p, '__is_virtual__', True)
+
         self.blank = self.dictionary.bos()
         self.objective = nn.CTCLoss(
             blank=self.blank,
@@ -209,8 +225,8 @@ class DownstreamExpert(nn.Module):
         device = features[0].device
         features_len = torch.IntTensor([len(feat) for feat in features])
         features = pad_sequence(features, batch_first=True).to(device=device)
-        features = self.projector(features)
-        logits, log_probs_len = self.model(features, features_len)
+        features = self.curr_projector(features)
+        logits, log_probs_len = self.curr_model(features, features_len)
         log_probs = nn.functional.log_softmax(logits, dim=-1)
         return log_probs, log_probs_len
 
@@ -225,6 +241,22 @@ class DownstreamExpert(nn.Module):
                     file.write(f"{filename} {hyp}\n")
 
         return hyps
+
+    # Interface
+    def copy_params(self):
+        self.virtual_projector.load_state_dict(self.projector.state_dict())
+        self.virtual_model.load_state_dict(self.model.state_dict())
+
+    # Interface
+    def use_virtual(self):
+        self.copy_params()
+        self.curr_projector = self.virtual_projector
+        self.curr_model = self.virtual_model
+        
+    # Interface
+    def use_default(self):
+        self.curr_projector = self.projector
+        self.curr_model = self.model
 
     # Interface
     def forward(self, split, features, labels, filenames, records, **kwargs):
@@ -346,11 +378,25 @@ class DownstreamExpert(nn.Module):
         key_prefix = f"{split}"
         loss = torch.FloatTensor(records['loss']).mean().item()
         print(f'{split} loss: {loss}')
+
+        if key_prefix == 'train': 
+            average_aux_loss = torch.FloatTensor(records['aux_loss']).mean().item() if len(records['aux_loss']) > 0 else 0
+            logger.add_scalar(
+                f'asr/{key_prefix}-aux_loss', average_aux_loss, global_step=global_step
+            )
+            results.update({f'{key_prefix}-aux_loss': average_aux_loss})
+
+            total_loss = loss + average_aux_loss
+            logger.add_scalar(
+                f'asr//{key_prefix}-total_loss', total_loss, global_step=global_step
+            )
+            results.update({f'{key_prefix}-total_loss': total_loss})
+
         if 'layers' in kwargs:
             for i, layer in enumerate(kwargs['layers']):
                 # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})
                 for j, logit in enumerate(list(layer.adapterswitch.probs.cpu())):
-                    results.update({f"layer_{i}/{key_prefix}_{j}": logit.item()})
+                    results.update({f"layer_{i}/{key_prefix}_{layer.used_adapter[j]}": logit.item()})
                 results.update({f"tau": layer.adapterswitch.switch_temperature[0]})
         if 'norm_weights' in kwargs:
             for i, weight in enumerate(kwargs['norm_weights']):

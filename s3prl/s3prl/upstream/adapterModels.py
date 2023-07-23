@@ -685,7 +685,7 @@ class AdapterSwitch(nn.Module):
             weights = torch.softmax(self.switch_logits, dim=-1).unsqueeze(0)
         elif self.config.algo.name == 'fair_darts':
             weights = torch.sigmoid(self.switch_logits).unsqueeze(0)
-        elif self.config.algo_name == 's3delta':
+        elif self.config.algo.name == 's3delta':
             # Zeta should be a tensor with the same shape of switch_logits
             weights = torch.sigmoid(torch.log((self.gumbel_noise * self.p) / ((1 - self.gumbel_noise) * (1 - self.p))) / self.switch_temperature[0])
         elif self.config.algo.name in ['gdas', 'gumbel_darts']:

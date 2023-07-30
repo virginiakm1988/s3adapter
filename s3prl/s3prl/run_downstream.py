@@ -40,7 +40,7 @@ def get_downstream_args():
     parser.add_argument('--search_algo', type=str, 
                         help='Specified algorithm for architecture search. Default algorithm is GDAS.', 
                         default='gdas', 
-                        choices=['gdas', 'darts', 'fair_darts', 'gumbel_darts'])
+                        choices=['gdas', 'darts', 'fair_darts', 'gumbel_darts', 's3delta'])
     # distributed training
     parser.add_argument('--backend', default='nccl', help='The backend for distributed training')
     parser.add_argument('--local_rank', type=int,

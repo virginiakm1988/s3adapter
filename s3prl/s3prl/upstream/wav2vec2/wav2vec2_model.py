@@ -3269,6 +3269,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
         self.adapter_config = adapter_config
         self.used_adapter = self.adapter_config.adapter.type
 
+        assert not(self.adapter_config.adapter.switch.algo.name == 's3delta' and 'skip' in self.used_adapter), \
+            "Skip should not be an candidate in adapter when running s3delta!"
+
         # Override adapteConfig.adapter.switch.path if the number of path is not equal to number of adapter used
         if len(self.adapter_config.adapter.switch.path) != len(self.used_adapter):
             self.adapter_config.adapter.switch.path = [i for i in range(len(self.used_adapter))]
@@ -3294,6 +3297,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
             'bitfit': BitFitAdapter
         }
         self.delta_modules = [delta_modules[adapter_name](self) for adapter_name in self.used_adapter]
+        self.skip_connection = Skip(self) if self.adapter_config.adapter.switch.algo.name == 's3delta' else None
 
         self.delta_modules = np.array(self.delta_modules)
         self.curr_modules = self.delta_modules
@@ -3301,7 +3305,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         for delta_p in self.delta_list.parameters():
             setattr(delta_p, '__is_delta__', True)
 
-        if self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts'] \
+        if self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
             and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order):
             print('Create Virtual Adapters')
             self.virtual_modules = [delta_modules[adapter_name](self) for adapter_name in self.used_adapter]
@@ -3328,7 +3332,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         self_attn_mask: torch.Tensor = None,
         self_attn_padding_mask: torch.Tensor = None,
         need_weights: bool = False,
-        att_args=None,
+        att_args = None,
     ):
         """
         LayerNorm is applied either before or after the self-attention/ffn
@@ -3421,29 +3425,47 @@ class TransformerSentenceEncoderLayer(nn.Module):
                         x = torch.einsum('ijkl,ijlk->ijl', x, weights)
                         layer_result = torch.einsum('ijkl,ijlk->ijl', layer_result, weights)
                 else:
-                    # One-Hot
-                    res = \
-                        self.curr_modules[max_idx](
-                            x,  
-                            self, 
+                    # Hard Forward
+                    all_x, all_layer_result = [], []
+                    for i, weight in enumerate(weights[0]):
+                        if weight > 0:
+                            x_, (attn, layer_result_) = self.curr_modules[i](
+                                x,  
+                                self, 
+                                self_attn_mask=self_attn_mask, 
+                                self_attn_padding_mask=self_attn_padding_mask, 
+                                need_weights=need_weights, 
+                                att_args=att_args
+                            )
+                            all_x.append(weight * x_)
+                            all_layer_result.append(weight * layer_result_)
+                    
+                    x = torch.stack(all_x, dim=0).sum(dim=0)
+                    layer_result = torch.stack(all_layer_result, dim=0).sum(dim=0)
+            else:
+                # Stage 2
+                if self.adapterswitch.fixed_idx:
+                    all_x, all_layer_result = [], []
+                    for idx in self.adapterswitch.fixed_idx:
+                        x_, (attn, layer_result_) = self.curr_modules[idx](
+                            x, self, 
                             self_attn_mask=self_attn_mask, 
                             self_attn_padding_mask=self_attn_padding_mask, 
                             need_weights=need_weights, 
                             att_args=att_args
                         )
-                    x = weights[0][max_idx] * res[0]
-                    
-                    # logging.warning(x.shape)
-                    attn = res[-1][0]  # self.delta_modules[self.adapter_idx['skip']].attn
-                    layer_result = res[-1][1] # self.delta_modules[self.adapter_idx['skip']].layer_result
-            else:
-                x, (attn, layer_result) = self.curr_modules[self.adapterswitch.fixed_idx](
-                    x, self, 
-                    self_attn_mask=self_attn_mask, 
-                    self_attn_padding_mask=self_attn_padding_mask, 
-                    need_weights=need_weights, 
-                    att_args=att_args
-                )
+                        all_x.append(x_)
+                        all_layer_result.append(layer_result_)
+                    x = torch.stack(all_x, dim=0).sum(dim=0)
+                    layer_result = torch.stack(all_layer_result, dim=0).sum(dim=0)
+                else:
+                    x, (attn, layer_result) = self.skip_connection(
+                        x, self, 
+                        self_attn_mask=self_attn_mask, 
+                        self_attn_padding_mask=self_attn_padding_mask, 
+                        need_weights=need_weights, 
+                        att_args=att_args
+                    )
             
             return x, (attn, layer_result)
             normal_output, lora_output, bitfit_output = self.self_attn(

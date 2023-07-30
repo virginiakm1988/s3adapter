@@ -53,6 +53,8 @@ class UpstreamExpert(UpstreamBase):
 
             self.hook_postprocess = postprocess
 
+        self.last_zeta = 0.
+
     def get_downsample_rates(self, key: str) -> int:
         return 320
 
@@ -60,10 +62,10 @@ class UpstreamExpert(UpstreamBase):
         for layer in self.model.encoder.layers:
             layer.adapterswitch.reduce_tau()
     
-    def compute_zeta(self, prev_zeta: float, max_num_param: float, tau: float, eps=1e-7):
-        alphas = np.array(self.model.all_alpha)
-        param_nums = np.array(self.model.param_nums)
-
+    def compute_zeta(self, max_num_param: float, tau: float, eps=1e-7):
+        flatten_alpha = torch.stack(self.model.all_alpha(), dim=0).view(-1).tolist()
+        alphas = np.array(flatten_alpha)
+        param_nums = np.array(self.model.param_nums())
         def func(zeta):
             x = (alphas - zeta) / tau
             x[x < -200] = -200
@@ -71,18 +73,18 @@ class UpstreamExpert(UpstreamBase):
             ret = (sigmoid_shifted_alphas * param_nums).sum() - \
                 max_num_param * (1 - eps)
             return ret
-        zeta_res = fsolve(func, prev_zeta)[0]
+        zeta_res = fsolve(func, self.last_zeta)[0]
         
-        # setup zeta for all switch
-        for layer in self.model.encoder.layers():
-            layer.adapterswitch.zeta = zeta_res
+        self.last_zeta = zeta_res
 
         return zeta_res
 
-    def compute_shifted_sigmoid(self, prev_zeta, max_num_param, tau, eps=1e-7):
-        curr_zeta = self.compute_zeta(prev_zeta, max_num_param, tau, eps)
-
-        all_alphas = torch.cat(self.model.all_alpha, dim=0)
+    def compute_shifted_sigmoid(self, max_num_param: float, tau: float, eps=1e-7, use_last=True):
+        if use_last:
+            curr_zeta = self.last_zeta
+        else:
+            curr_zeta = self.compute_zeta(max_num_param, tau, eps)
+        all_alphas = torch.stack(self.model.all_alpha(), dim=0)
         x = (all_alphas - curr_zeta) / tau
         x[x < -200] = -200
 
@@ -92,9 +94,32 @@ class UpstreamExpert(UpstreamBase):
         dp[sigmoid_x == 0] = eps
         sigmoid_x = sigmoid_x + dp
 
-        norm = sigmoid_x.detach().sum / sigmoid_x.sum()
-        for layer in self.model.encoder.layers:
-            layer.adapterswitch.p = torch.sigmoid((layer.adapterswitch.switch_logits - curr_zeta) / tau) * norm
+        norm = sigmoid_x.sum().detach() / sigmoid_x.sum()
+        for idx, layer in enumerate(self.model.encoder.layers):
+            layer.adapterswitch.p = sigmoid_x[idx] * norm
+            # print(f'layer_{idx}.p = {layer.adapterswitch.p}')
+
+    def set_hard_forward_structure(self, max_num_param: float):
+        # shape: [num_layers, num_path]
+        all_alpha = torch.stack(self.model.all_alpha(), dim=0)
+        all_alpha = [
+            (layer_idx, path_idx, element.item()) 
+            for layer_idx, logits in enumerate(all_alpha) 
+            for path_idx, element in enumerate(logits)
+        ]
+        all_alpha = sorted(all_alpha, key=lambda x:x[2], reverse=True)
+        # Use an adapter with the highest prob when the current total number of parameters are still within the budget.
+        curr_num_param = 0
+        selected_path = [[] for _ in range(len(self.model.encoder.layers))]
+        for alpha in all_alpha:
+            layer_idx, path_idx = alpha[0], alpha[1]
+            num_param = self.model.encoder.layers[layer_idx].delta_list[path_idx].num_param
+            if curr_num_param + num_param <= max_num_param:
+                selected_path[layer_idx].append(path_idx)
+                curr_num_param += num_param
+        
+        for layer_idx, layer in enumerate(self.model.encoder.layers):
+            layer.adapterswitch.fixed_idx = sorted(selected_path[layer_idx])
 
     def aux_loss(self):
         loss = 0
@@ -111,6 +136,11 @@ class UpstreamExpert(UpstreamBase):
         # Sample gumbel noise for switch
         for layer in self.model.encoder.layers:
             layer.adapterswitch.sample_gumbel()
+
+    def sample_uniform(self):
+        # Sample uniform noise for switch
+        for layer in self.model.encoder.layers:
+            layer.adapterswitch.sample_uniform()
 
     # For the second-order approximation in DARTS algorithm
     def use_virtual(self):

@@ -150,7 +150,7 @@ class Runner():
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.init_steps}")
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.steps}, {self.adapter_config.adapter.switch.tau.stop_value}")
         
-        self.do_virtual = self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts'] \
+        self.do_virtual = self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
             and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order)
         if self.do_virtual:
             assert not (self.adapter_config.adapter.switch.algo.second_order and not self.adapter_config.adapter.switch.algo.first_order),\
@@ -193,7 +193,7 @@ class Runner():
                     model_dict.update(prompt_weight)
                     model.load_state_dict(model_dict)
             if self.args.adapter:
-                adapter_weight = self.init_ckpt.get('adapter')
+                adapter_weight = None# self.init_ckpt.get('adapter')
                 if adapter_weight:
                     show(f'[Runner] - Loading {"Adapter"} weights & switch logits from the previous experiment')
                     model_dict = model.state_dict()
@@ -305,6 +305,9 @@ class Runner():
                 "get_downsample_rates", 
                 "reduce_tau", 
                 "sample_gumbel", 
+                "sample_uniform",
+                "compute_shifted_sigmoid",
+                "set_hard_forward_structure",
                 "aux_loss", 
                 "set_stage", 
                 "use_virtual", 
@@ -436,10 +439,13 @@ class Runner():
                 linelogger.info(f'train f_lr at stage 1')
                 self.featurizer.model.train()
         elif stage == 2:
+            if self.adapter_config.adapter.switch.algo.name == 's3delta':
+                self.upstream.model.set_hard_forward_structure(max_num_param=self.adapter_config.adapter.switch.algo.para_budget)
             if isinstance(self.downstream.model, DDP):
                 self.downstream.model.module.adapterConfig.adapter.switch.ratio = 0
             else:
                 self.downstream.model.adapterConfig.adapter.switch.ratio = 0
+            self.upstream.model.train()
             self.featurizer.model.train()
     
     @ddprecod
@@ -500,9 +506,15 @@ class Runner():
         a_optimizer = self._get_optimizer(trainable_a_paras, 'a_optimizer', [])
         v_optimizer = self._get_optimizer(trainable_v_paras, 'v_optimizer', []) if len(trainable_v_paras) else None
 
+        if v_optimizer:
+            assert len(trainable_w_paras) == len(trainable_v_paras), "Number of trainable_w_paras should be equal to number of trainable_v_paras"
         # Make switch_logit's grad equals to zero tensor, rather than None
         with torch.no_grad():
             for p in trainable_a_paras:
+                p.grad = torch.zeros_like(p.data)
+            for p in trainable_w_paras:
+                p.grad = torch.zeros_like(p.data)
+            for p in trainable_v_paras:
                 p.grad = torch.zeros_like(p.data)
         
         # scheduler
@@ -738,8 +750,14 @@ class Runner():
             logger.close()
             wandb.finish()
 
-    def model_forward(self, data: dict, train_split, records, specaug=None):
-        # forward data to the whole pipeline       
+    def model_forward(self, data: dict, train_split, records, specaug=None, use_last=True):
+        # forward data to the whole pipeline
+        if self.adapter_config.adapter.switch.algo.name == 's3delta':
+            self.upstream.model.compute_shifted_sigmoid(
+                max_num_param=self.adapter_config.adapter.switch.algo.para_budget, 
+                tau=self.adapter_config.adapter.switch.algo.sigmoid_tau,
+                use_last=use_last
+            )
         wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in data['wavs']]
         if self.upstream.trainable:
             features = self.upstream.model(wavs)
@@ -785,6 +803,8 @@ class Runner():
         batch_ids = []
         if self.adapter_config.adapter.switch.algo.use_gumbel and self.stage < 2:
             self.upstream.model.sample_gumbel()
+        if self.adapter_config.adapter.switch.algo.name == 's3delta':
+            self.upstream.model.sample_uniform()
         try:
             if self.do_virtual:
                 v_optim.load_state_dict(w_optim.state_dict())
@@ -796,7 +816,7 @@ class Runner():
                     p.requires_grad = False
                 
                 for i in range(gradient_accumulate_steps):
-                    v_loss = self.model_forward(input_data['train'][i], train_split, v_records, specaug)
+                    v_loss = self.model_forward(input_data['train'][i], train_split, v_records, specaug, use_last=False)
                     (v_loss / gradient_accumulate_steps).backward()
                     del v_loss
                 
@@ -811,6 +831,7 @@ class Runner():
                 all_dalpha = []
                 all_dw = []
                 curr_trainable_parameters = trainable_a_paras + trainable_v_paras if self.adapter_config.adapter.switch.algo.second_order else trainable_a_paras
+                
                 for i in range(gradient_accumulate_steps):
                     a_loss = self.model_forward(input_data['switch'][i], train_split, records, specaug)
                     grad = torch.autograd.grad(
@@ -829,17 +850,15 @@ class Runner():
 
                 summed_dalpha = []
                 for dalpha in zip(*all_dalpha):
-                    summed_da = torch.zeros_like(dalpha[0])
-                    for da in dalpha:
-                        summed_da += da
+                    valid_da = [da for da in dalpha if da is not None]
+                    summed_da = sum(valid_da) if valid_da else None
                     summed_dalpha.append(summed_da)
                 
                 if self.adapter_config.adapter.switch.algo.second_order:
                     summed_dw = []
                     for dw in zip(*all_dw):
-                        summed_w = torch.zeros_like(dw[0])
-                        for w in dw:
-                            summed_w += w
+                        valid_dw = [w for w in dw if w is not None]
+                        summed_w = sum(valid_dw) if valid_dw else None
                         summed_dw.append(summed_w)
                     # compute the higher-order derivatives
                     all_hessian = self.compute_hessian(trainable_w_paras, trainable_a_paras, summed_dw, input_data['train'], train_split, gradient_accumulate_steps, specaug)
@@ -854,7 +873,7 @@ class Runner():
             else:
                 # normal forward
                 for i in range(gradient_accumulate_steps):
-                    loss = self.model_forward(input_data['switch'][i], train_split, records, specaug)
+                    loss = self.model_forward(input_data['switch'][i], train_split, records, specaug, use_last=False)
                     (loss / gradient_accumulate_steps).backward()
                     del loss
 
@@ -1025,6 +1044,9 @@ class Runner():
             split = self.args.evaluate_split
             tempdir = tempfile.mkdtemp()
             logger = SummaryWriter(tempdir)
+
+        if self.adapter_config.adapter.switch.algo.name == 's3delta':
+            self.upstream.model.set_hard_forward_structure(max_num_param=self.adapter_config.adapter.switch.algo.para_budget)
 
         # fix seed to guarantee the same evaluation protocol across steps 
         random.seed(self.args.seed)

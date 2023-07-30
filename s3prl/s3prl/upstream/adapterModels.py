@@ -619,32 +619,40 @@ class AdapterSwitch(nn.Module):
         logger.info(f"paths = {len(initial_logits)}")
 
         self.prev_mode = None
-        self.fixed_idx = len(initial_logits)
+        self.fixed_idx = None #len(initial_logits)
         self.used_adapter = used_adapter_name
         # For algorithms sampling noise from GUmbel distribution
         if self.config.algo.use_gumbel:
             self.gumbel_noise = None
         if self.config.algo.name == 's3delta':
-            self.p = 0.0
+            self.uniform_noise = None
+            self.p = torch.zeros_like(self.switch_logits)
 
     @property
     def probs(self):
-        if self.config.algo.name not in ['fair_darts', 's3delta']:
-            return torch.softmax(self.switch_logits / self.switch_temperature[0], dim=-1)
-        else:
+        if self.config.algo.name == 'fair_darts':
             return torch.sigmoid(self.switch_logits)
+        elif self.config.algo.name == 's3delta':
+            return self.p
+        else:
+            return torch.softmax(self.switch_logits / self.switch_temperature[0], dim=-1)
 
     def get_arch(self):
-        return torch.argmax(self.switch_logits, dim=-1).item()
+        return [torch.argmax(self.switch_logits, dim=-1).item()]
     
     def train(self, mode: bool = True):
         logger.info(f'{"train" if mode else "eval"} invoked')
         # self.switch_logits.requires_grad = mode
         self.training = (mode and self.config.stage != 2)
         if not self.training:
-            self.fixed_idx = self.get_arch()
+            if self.config.algo.name != 's3delta':
+                self.fixed_idx = self.get_arch()
             # self.soft_logits = torch.softmax(self.switch_logits / self.switch_temperature[0], -1)
-            logger.info(f'current adapter of layer_{self.layer_idx}: {self.used_adapter[self.fixed_idx]}')
+            if not self.fixed_idx:
+                logger.info(f'layer_{self.layer_idx} did not have any adapters, use skip connection.')
+            else:
+                for idx in self.fixed_idx:
+                    logger.info(f'current adapter of layer_{self.layer_idx}: {self.used_adapter[idx]}')
         else:
             pass
             # self.fixed_idx = None
@@ -665,7 +673,7 @@ class AdapterSwitch(nn.Module):
         if self.config.algo.name == 'fair_darts':
             # Fair-DARTS: zero-one loss = -1/N * sum(sigmoid(alpha) - 0.5) * scaling_factor
             return -F.mse_loss(torch.sigmoid(self.switch_logits), self.initial_logits.to(self.switch_logits.device))
-        raise
+        raise NotImplementedError
 
     def sample_gumbel(self):
         batch_size = 1
@@ -677,6 +685,9 @@ class AdapterSwitch(nn.Module):
             raise NotImplementedError
         
         self.gumbel_noise =  self.gumbel.sample(sample_size).to(self.probs.device)
+    
+    def sample_uniform(self):
+        self.uniform_noise = torch.rand(len(self.p)).to(self.p.device)
 
     def forward(self):
         self.switch_mode()
@@ -686,8 +697,20 @@ class AdapterSwitch(nn.Module):
         elif self.config.algo.name == 'fair_darts':
             weights = torch.sigmoid(self.switch_logits).unsqueeze(0)
         elif self.config.algo.name == 's3delta':
-            # Zeta should be a tensor with the same shape of switch_logits
-            weights = torch.sigmoid(torch.log((self.gumbel_noise * self.p) / ((1 - self.gumbel_noise) * (1 - self.p))) / self.switch_temperature[0])
+            self.uniform_noise = self.uniform_noise.to(self.p.device)
+            # Calculate z_hat = sigmoid(log[(u * p) / {(1 - u) * (1 - p)}] / tau)
+            z_hat = torch.sigmoid(
+                torch.log((self.uniform_noise * self.p) / ((1 - self.uniform_noise) * (1 - self.p))) / self.switch_temperature[0]
+            )
+            weights = torch.ones_like(z_hat) - z_hat.detach() + z_hat
+            # Close a gate if z_hat_i < 0.5
+            unused_index = (z_hat < 0.5).nonzero()
+            weights[unused_index] = 0.0
+            if torch.sum(weights) == 0.0:
+                # logger.info(f'layer {self.layer_idx}: none has been chosen, z_hat = {z_hat}, use the path with the largest p')
+                max_idx = torch.argmax(self.p)
+                weights[max_idx] = 1 - self.p[max_idx].detach() + self.p[max_idx]
+            weights = weights.unsqueeze(0)
         elif self.config.algo.name in ['gdas', 'gumbel_darts']:
             # Compute the weights of the convex sum.
             weights = torch.softmax((self.gumbel_noise + self.switch_logits) / self.switch_temperature[0], dim=-1)
@@ -883,6 +906,12 @@ class PAdapter(nn.Module):
                 )
         self.attn = self.layer_result = None
         # self.activation_fn = parentModule.activation_fn
+        self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
+    
+    @property
+    def num_parameter(self):
+        return self.num_param
+    
     def forward(self, x, parent, **kwargs):
         residual = x
         parallel_input = x
@@ -936,6 +965,13 @@ class SAdapter(nn.Module):
                 )
         self.attn = self.layer_result = None
         # self.activation_fn = parentModule.activation_fn
+
+        self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
+    
+    @property
+    def num_parameter(self):
+        return self.num_param
+    
     def forward(self, x, parent: nn.Module, **kwargs):
         residual = x
         self_attn_mask = kwargs['self_attn_mask']
@@ -1000,7 +1036,12 @@ class LoRAAdapter(nn.Module):
             p['p'].add_module(p['k'], p['m']) 
             # _modules[p['k']] = p['m']
 
-        self.attn = self.layer_result = None                 
+        self.attn = self.layer_result = None
+        self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
+    
+    @property
+    def num_parameter(self):
+        return self.num_param             
 
     def forward(self, x, parent, **kwargs):
         residual = x
@@ -1047,6 +1088,13 @@ class LNFitAdapter(nn.Module):
         self.lnfit_final_layer_norm = nn.LayerNorm(parentModule.embedding_dim, eps=1e-5, elementwise_affine=True)
         self.attn = self.layer_result = None
         # self.activation_fn = parentModule.activation_fn
+
+        self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
+    
+    @property
+    def num_parameter(self):
+        return self.num_param
+    
     def forward(self, x, parent, **kwargs):
         self_attn_mask = kwargs['self_attn_mask']
         self_attn_padding_mask = kwargs['self_attn_padding_mask']
@@ -1156,6 +1204,12 @@ class BitFitAdapter(nn.Module):
             p['p'].register_parameter(p['k'], p['m']) 
 
         self.layer_result = self.attn = None
+
+        self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
+    
+    @property
+    def num_parameter(self):
+        return self.num_param
 
     def forward(self, x, parent, **kwargs):
         residual = x

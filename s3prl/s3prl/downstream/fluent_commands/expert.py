@@ -143,7 +143,7 @@ class DownstreamExpert(nn.Module):
     # Interface
     def get_dataloader(self, mode, epoch=None, **kwargs):
         if mode == 'train':
-            switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1)
+            switch_ratio = self.adapterConfig.adapter.switch.ratio
             self.train_dataset, self.switch_train_dataset = \
                 torch.utils.data.random_split(self.full_train_dataset, [1 - switch_ratio, switch_ratio])
             return {'train': eval(f'self.get_train_dataloader')(),

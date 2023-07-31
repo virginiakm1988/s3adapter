@@ -134,7 +134,7 @@ class DownstreamExpert(nn.Module):
         assert self.adapterConfig != None, "adapterConfig is none!"
         if split == 'train':
             # reset the switch dataset ratio
-            self.switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1 and mode != 'train_stage2')
+            self.switch_ratio = self.adapterConfig.adapter.switch.ratio
             # devide the dataset
             self.train_dataset, self.switch_dataset = \
                 torch.utils.data.random_split(self.train_dataset_full, [1 - self.switch_ratio, self.switch_ratio])

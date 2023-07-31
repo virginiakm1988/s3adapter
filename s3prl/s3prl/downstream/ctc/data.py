@@ -72,7 +72,7 @@ def create_dataset(split, tokenizer, name, bucketing, batch_size, **kwargs):
     return dataset, loader_bs
 
 
-def load_dataset(split, tokenizer, corpus, switch_ratio=0.3):
+def load_dataset(split, tokenizer, corpus, switch_ratio=0.5):
     ''' Prepare dataloader for training/validation'''
     # real_split = split
     # split = 'train' if split == 'switch' else split

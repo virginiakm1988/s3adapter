@@ -446,8 +446,6 @@ class Runner():
             else:
                 self.downstream.model.adapterConfig.adapter.switch.ratio = 0
 
-            if self.adapter_config.adapter.switch.algo.name == 's3delta':
-                self.upstream.model.set_hard_forward_structure(self.adapter_config.adapter.switch.algo.max_num_param)
             self.featurizer.model.train()
     
     @ddprecod
@@ -551,7 +549,7 @@ class Runner():
         train_split = self.config['runner'].get("train_dataloader", "train")
 
         linelogger.info(f'train stage 1 for {self.stage1_steps} steps')
-        if not self.adapter_config.adapter.switch.baseline:    # Do search
+        if not self.adapter_config.adapter.switch.baseline and self.stage == 1:    # Do search
             adapterModes = ['train', 'switch'] if self.adapter_config.adapter.switch.algo.name in ['gdas'] else ['switch', 'train']
         else:
             adapterModes = ['train'] 

@@ -131,15 +131,6 @@ class DownstreamExpert(nn.Module):
                 self.loaderrc[f"{mode}_dir"],
                 **self.datarc,
             )
-            # split the training set into two parts
-            if mode == "train":
-                switch_ratio = self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1)
-                train_dataset, switch_dataset = torch.utils.data.random_split(dataset, [1 - switch_ratio, switch_ratio])
-                dataset = {
-                    "original": dataset,
-                    "train": train_dataset,
-                    "switch": switch_dataset
-                }
             setattr(self, f"{mode}_dataset", dataset)
 
         if mode == "train":
@@ -170,28 +161,32 @@ class DownstreamExpert(nn.Module):
         self.curr_model = self.model
 
     def _get_train_dataloader(self, dataset):
-        train_sampler = DistributedSampler(dataset["train"]) if is_initialized() else None
-        switch_sampler = DistributedSampler(dataset["switch"]) if is_initialized() else None
+        # Split the dataset
+        switch_ratio = self.adapterConfig.adapter.switch.ratio
+        weight_dataset, switch_dataset = torch.utils.data.random_split(dataset, [1 - switch_ratio, switch_ratio])
+
+        train_sampler = DistributedSampler(weight_dataset) if is_initialized() else None
+        switch_sampler = DistributedSampler(switch_dataset) if is_initialized() else None
         
         train_dataloader = DataLoader(
-            dataset["train"],
+            weight_dataset,
             batch_size=self.train_batch_size,
             shuffle=(train_sampler is None),
             sampler=train_sampler,
             num_workers=self.loaderrc["num_workers"],
             drop_last=False,
             pin_memory=True,
-            collate_fn=dataset["original"].collate_fn,
+            collate_fn=dataset.collate_fn,
         )
-        switch_dataloader = None if len(dataset["switch"]) == 0 else DataLoader(
-            dataset["switch"],
+        switch_dataloader = None if len(switch_dataset) == 0 else DataLoader(
+            switch_dataset,
             batch_size=self.train_batch_size,
             shuffle=(switch_sampler is None),
             sampler=switch_sampler,
             num_workers=self.loaderrc["num_workers"],
             drop_last=False,
             pin_memory=True,
-            collate_fn=dataset["original"].collate_fn,
+            collate_fn=dataset.collate_fn,
         )
         
         return {

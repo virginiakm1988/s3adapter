@@ -98,7 +98,7 @@ class DownstreamExpert(nn.Module):
     # Interface
     def get_dataloader(self, split, mode=None, epoch=None):
         return load_dataset(split, self.tokenizer, self.corpus,  
-                    switch_ratio=self.adapterConfig.adapter.switch.ratio * (len(self.adapterConfig.adapter.switch.path) > 1 and mode != 'train_stage2'))
+                    switch_ratio=self.adapterConfig.adapter.switch.ratio)
 
     # Interface
     def forward(self, split, features, labels, filenames, records, **kwargs):

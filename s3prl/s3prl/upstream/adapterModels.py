@@ -904,13 +904,14 @@ class PAdapter(nn.Module):
                     nn.GELU(),
                     nn.Linear(32, emb_dim),
                 )
+        self.name = 'para'
         self.attn = self.layer_result = None
         # self.activation_fn = parentModule.activation_fn
-        self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
+        self.num_param = sum(p.nelement() for p in self.parameters())
     
     @property
     def num_parameter(self):
-        return self.num_param
+        return self.num_param /1e6
     
     def forward(self, x, parent, **kwargs):
         residual = x
@@ -963,14 +964,15 @@ class SAdapter(nn.Module):
                     nn.GELU(),
                     nn.Linear(32, emb_dim),
                 )
+        
+        self.name = 'seq'
         self.attn = self.layer_result = None
         # self.activation_fn = parentModule.activation_fn
-
-        self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
+        self.num_param = sum(p.nelement() for p in self.parameters())
     
     @property
     def num_parameter(self):
-        return self.num_param
+        return self.num_param / 1e6
     
     def forward(self, x, parent: nn.Module, **kwargs):
         residual = x
@@ -1013,35 +1015,48 @@ class SAdapter(nn.Module):
 # from s3prl.upstream.wav2vec2.wav2vec2_model import quant_noise
 
 class LoRAAdapter(nn.Module):
-    # Use LoRA for q_proj and v_proj in MuliHeadAttention
+    # Use LoRA for q_proj and v_proj in MultiHeadAttention
     def __init__(self, parentModule: nn.Module):
         super().__init__()
         for name, module in parentModule.named_children():
             # self.add_module(name, module)
             pass
         
-        parent_refs = []
         for name, module in parentModule.named_parameters():
             for loraName in ['q_proj', 'v_proj']:
-                if loraName in name:
+                if loraName in name and not getattr(module, '__is_delta__', False) and not getattr(module, '__is_virtual__', False):
                     loraKey = name.split(loraName)[0] + loraName
                     parent, lastKey, child = find_module(parentModule, loraKey)
+                    if getattr(self, lastKey, False):
+                        continue
                     outdim, indim  = child.weight.shape
-                    addDict = ({'p': parent, 'k': f"lora_{lastKey}", 'm': quant_noise(lora.Linear(indim, outdim, r=8), parentModule.self_attn.q_noise, parentModule.self_attn.qn_block_size)})
-                    addDict['m'].weight = child.weight
-                    addDict['m'].bias = child.bias
-                    parent_refs.append(addDict)
-        
-        for p in parent_refs:
-            p['p'].add_module(p['k'], p['m']) 
-            # _modules[p['k']] = p['m']
+                    setattr(self, lastKey, quant_noise(lora.Linear(indim, outdim, r=8), parentModule.self_attn.q_noise, parentModule.self_attn.qn_block_size))
+                    ref = getattr(self, lastKey, None)
+                    ref.weight = child.weight
+                    ref.bias = child.bias
 
+        self.name = 'lora'
+        self.lora_keys = ['q_proj', 'v_proj']
         self.attn = self.layer_result = None
-        self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
+        self.num_param = sum(p.nelement() for p in self.parameters())
     
     @property
     def num_parameter(self):
-        return self.num_param             
+        return self.num_param / 1e6
+
+    def lora_weights(self):
+        ref = {key: getattr(self, key, None) for key in self.lora_keys}
+        return {
+            key: {'lora_A': ref[key].lora_A, 'lora_B': ref[key].lora_B}
+            for key in self.lora_keys
+        }
+    
+    def lora_scaling(self):
+        ref = {key: getattr(self, key, None) for key in self.lora_keys}
+        return {
+            key: ref[key].scaling
+            for key in self.lora_keys
+        }
 
     def forward(self, x, parent, **kwargs):
         residual = x
@@ -1058,6 +1073,8 @@ class LoRAAdapter(nn.Module):
             key_padding_mask=self_attn_padding_mask,
             need_weights=False,
             use_lora=True,
+            lora_weights = self.lora_weights(),
+            lora_scaling = self.lora_scaling()
         )
 
         lora_out = parent.dropout1(lora_out)
@@ -1084,11 +1101,12 @@ class LNFitAdapter(nn.Module):
         for name, module in parentModule.named_children():
             pass
             # self.add_module(name, module)
+        
         self.lnfit_self_attn_layer_norm = nn.LayerNorm(parentModule.embedding_dim, eps=1e-5, elementwise_affine=True)
         self.lnfit_final_layer_norm = nn.LayerNorm(parentModule.embedding_dim, eps=1e-5, elementwise_affine=True)
-        self.attn = self.layer_result = None
-        # self.activation_fn = parentModule.activation_fn
 
+        self.name = 'lnfit'
+        self.attn = self.layer_result = None
         self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
     
     @property
@@ -1194,22 +1212,26 @@ class BitFitAdapter(nn.Module):
         
         parent_refs = []
         for name, module in parentModule.named_parameters():
-            if 'bias' in name and 'lnfit' not in name:
+            if 'bias' in name and 'lnfit' not in name and not getattr(module, '__is_delta__', False) and not getattr(module, '__is_virtual__', False):
+                # name: module.bias
                 parent, lastKey, child = find_module(parentModule, name)
-                parent_refs.append({'p': parent, 'k': f"bitfit_{lastKey}" , 'm': nn.Parameter(torch.zeros_like(child))})
-                # parent.register_parameter(, )
+                setattr(self, f'{name.split(".")[-2]}_bitfit_bias', nn.Parameter(torch.zeros_like(child)))
         
-        for p in parent_refs:
-            # logging.warning(p)
-            p['p'].register_parameter(p['k'], p['m']) 
-
+        self.name = 'bitfit'
         self.layer_result = self.attn = None
-
-        self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
+        self.num_param = sum(p.nelement() for p in self.parameters())
     
     @property
     def num_parameter(self):
-        return self.num_param
+        return self.num_param / 1e6
+
+    def bitfit_weights(self):
+        return {
+            'q_proj': self.q_proj_bitfit_bias,
+            'k_proj': self.k_proj_bitfit_bias,
+            'v_proj': self.v_proj_bitfit_bias,
+            'out_proj': self.out_proj_bitfit_bias
+        }
 
     def forward(self, x, parent, **kwargs):
         residual = x
@@ -1226,22 +1248,23 @@ class BitFitAdapter(nn.Module):
             key_padding_mask=self_attn_padding_mask,
             need_weights=False,
             use_bitfit=True,
+            bitfit_weights=self.bitfit_weights(),
         )
 
         bitfit_out = parent.dropout1(bitfit_out)
         bitfit_out = residual + bitfit_out
-        bitfit_out = parent.self_attn_layer_norm(bitfit_out) + parent.self_attn_layer_norm.bitfit_bias
+        bitfit_out = parent.self_attn_layer_norm(bitfit_out) + self.self_attn_layer_norm_bitfit_bias
 
         residual = bitfit_out
-        bitfit_out = parent.activation_fn(parent.fc1(bitfit_out) + parent.fc1.bitfit_bias)
+        bitfit_out = parent.activation_fn(parent.fc1(bitfit_out) + self.fc1_bitfit_bias)
         bitfit_out = parent.dropout2(bitfit_out)
 
-        bitfit_out = parent.fc2(bitfit_out) + parent.fc2.bitfit_bias
+        bitfit_out = parent.fc2(bitfit_out) + self.fc2_bitfit_bias
         self.layer_result = bitfit_out
         bitfit_out = parent.dropout3(bitfit_out)
 
         bitfit_out = bitfit_out + residual
-        bitfit_out = parent.final_layer_norm(bitfit_out) + parent.final_layer_norm.bitfit_bias
+        bitfit_out = parent.final_layer_norm(bitfit_out) + self.final_layer_norm_bitfit_bias
 
         return bitfit_out, (self.attn, self.layer_result)
     
@@ -1253,6 +1276,7 @@ class Skip(nn.Module):
             # self.add_module(name, module)
         self.activation_fn = parentModule.activation_fn
         self.layer_result = self.attn = None
+    
     def forward(self, x, parent, **kwargs):
         residual = x
         self_attn_mask = kwargs['self_attn_mask']

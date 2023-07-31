@@ -445,7 +445,9 @@ class Runner():
                 self.downstream.model.module.adapterConfig.adapter.switch.ratio = 0
             else:
                 self.downstream.model.adapterConfig.adapter.switch.ratio = 0
-            self.upstream.model.train()
+
+            if self.adapter_config.adapter.switch.algo.name == 's3delta':
+                self.upstream.model.set_hard_forward_structure(self.adapter_config.adapter.switch.algo.max_num_param)
             self.featurizer.model.train()
     
     @ddprecod
@@ -479,10 +481,12 @@ class Runner():
                 for name, param in entry.model.named_parameters():
                     if getattr(param, '__is_delta__', False):
                         trainable_w_paras.append(param)
+                        linelogger.info(f'add {name} into trainable_w_paras')
                         param.requires_grad = True
                         adapter_param += param.nelement()
                     elif getattr(param, '__is_virtual__', False):
                         trainable_v_paras.append(param)
+                        linelogger.info(f'add {name} into trainable_v_paras')
                         param.requires_grad = True
                     elif getattr(param, '__is_switch__', False):
                         trainable_a_paras.append(param)
@@ -492,11 +496,11 @@ class Runner():
                 trainable_paras += list(additional_weight)
                 linelogger.info("Numbers of adapter PARAMETER: %.2fM" % (adapter_param/1e6))
             elif entry.trainable:
-                for n, p in entry.model.named_parameters():
-                    if getattr(p, '__is_virtual__', False):
-                        trainable_v_paras.append(p)
+                for name, param in entry.model.named_parameters():
+                    if getattr(param, '__is_virtual__', False):
+                        trainable_v_paras.append(param)
                     else:
-                        trainable_w_paras.append(p)
+                        trainable_w_paras.append(param)
             else:
                 linelogger.info(f'in eval: {entry.name}')
                 entry.model.eval()
@@ -546,8 +550,8 @@ class Runner():
         epoch = self.init_ckpt.get('Epoch', {'train': 0, 'switch': 0})
         train_split = self.config['runner'].get("train_dataloader", "train")
 
-        linelogger.info(f'train stage for {self.stage1_steps} steps')
-        if len(self.adapter_config.adapter.switch.path) > 1 and not self.adapter_config.adapter.switch.baseline:    # Do search
+        linelogger.info(f'train stage 1 for {self.stage1_steps} steps')
+        if not self.adapter_config.adapter.switch.baseline:    # Do search
             adapterModes = ['train', 'switch'] if self.adapter_config.adapter.switch.algo.name in ['gdas'] else ['switch', 'train']
         else:
             adapterModes = ['train'] 

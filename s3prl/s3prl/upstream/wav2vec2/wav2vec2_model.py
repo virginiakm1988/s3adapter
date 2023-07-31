@@ -807,10 +807,6 @@ class MultiheadAttention(nn.Module):
         k_proj_heads_norm = []
         q_proj_heads_norm = []
         v_proj_heads_norm = []
-        lora_q_proj_heads_norm = []
-        lora_v_proj_heads_norm = []
-
-        raise Exception('Fuck fairseq _get_reserve_head_index')
 
         for i in range(self.num_heads):
             start_idx = i * self.head_dim
@@ -845,28 +841,6 @@ class MultiheadAttention(nn.Module):
                 ).tolist()
                 + torch.sum(torch.abs(self.v_proj.bias[start_idx:end_idx])).tolist()
             )
-            if self.use_lora:
-                lora_q_proj_heads_norm.append(
-                    torch.sum(
-                        torch.abs(
-                            self.lora_q_proj.weight[
-                                start_idx:end_idx,
-                            ]
-                        )
-                    ).tolist()
-                    + torch.sum(torch.abs(self.lora_q_proj.bias[start_idx:end_idx])).tolist()
-                )
-                lora_v_proj_heads_norm.append(
-                    torch.sum(
-                        torch.abs(
-                            self.lora_v_proj.weight[
-                                start_idx:end_idx,
-                            ]
-                        )
-                    ).tolist()
-                    + torch.sum(torch.abs(self.lora_v_proj.bias[start_idx:end_idx])).tolist()
-                )
-
 
         heads_norm = []
         for i in range(self.num_heads):
@@ -1027,8 +1001,11 @@ class MultiheadAttention(nn.Module):
         attn_mask: Optional[Tensor] = None,
         before_softmax: bool = False,
         need_head_weights: bool = False,
-        use_lora: bool = False, 
+        use_lora: bool = False,
+        lora_weights: Optional[Dict[str, Dict[str, Tensor]]] = None,
+        lora_scaling: Optional[Dict[str, int]] = None,
         use_bitfit: bool = False,
+        bitfit_weights: Optional[Dict[str, Tensor]] = None,
     ) -> Tuple[Tensor, Optional[Tensor]]:  # (skip, lora)
         """Input shape: Time x Batch x Channel
 
@@ -1075,17 +1052,17 @@ class MultiheadAttention(nn.Module):
         v_proj_bias = self.v_proj.bias
         out_proj_bias = self.out_proj.bias
         if use_bitfit:
-            q_proj_bias = q_proj_bias + self.q_proj.bitfit_bias
-            v_proj_bias = v_proj_bias + self.v_proj.bitfit_bias
-            k_proj_bias = k_proj_bias + self.k_proj.bitfit_bias
-            out_proj_bias = out_proj_bias + self.out_proj.bitfit_bias
+            q_proj_bias = q_proj_bias + bitfit_weights['q_proj']
+            v_proj_bias = v_proj_bias + bitfit_weights['v_proj']
+            k_proj_bias = k_proj_bias + bitfit_weights['k_proj']
+            out_proj_bias = out_proj_bias + bitfit_weights['out_proj']
 
         q_proj_weight = self.q_proj.weight
         k_proj_weight = self.k_proj.weight
         v_proj_weight = self.v_proj.weight
         if use_lora:
-            q_proj_weight = q_proj_weight + ((self.arol_q_proj.lora_B @ self.arol_q_proj.lora_A) * self.arol_q_proj.scaling)
-            v_proj_weight = v_proj_weight + ((self.arol_v_proj.lora_B @ self.arol_v_proj.lora_A) * self.arol_v_proj.scaling)
+            q_proj_weight = q_proj_weight + ((lora_weights['q_proj']['lora_B'] @ lora_weights['q_proj']['lora_A']) * lora_scaling['q_proj'])
+            v_proj_weight = v_proj_weight + ((lora_weights['v_proj']['lora_B'] @ lora_weights['v_proj']['lora_A']) * lora_scaling['v_proj'])
             
         if (
             not self.onnx_trace
@@ -3275,9 +3252,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
         # Override adapteConfig.adapter.switch.path if the number of path is not equal to number of adapter used
         if len(self.adapter_config.adapter.switch.path) != len(self.used_adapter):
             self.adapter_config.adapter.switch.path = [i for i in range(len(self.used_adapter))]
-            logger.info("Override adapter_config.adpater.switch.path")
-        logger.info(f"Current used adapters: {self.used_adapter}")
-        logger.info(f"Path index of adapters: {self.adapter_config.adapter.switch.path}")
+            print("Override adapter_config.adpater.switch.path")
+        print(f"Current used adapters: {self.used_adapter}")
+        print(f"Path index of adapters: {self.adapter_config.adapter.switch.path}")
 
         self.adapterswitch = AdapterSwitch(
             config=self.adapter_config.adapter.switch, 
@@ -3302,9 +3279,13 @@ class TransformerSentenceEncoderLayer(nn.Module):
         self.delta_modules = np.array(self.delta_modules)
         self.curr_modules = self.delta_modules
         self.delta_list = nn.ModuleList(self.delta_modules)
-        for delta_p in self.delta_list.parameters():
-            setattr(delta_p, '__is_delta__', True)
 
+        for delta in self.delta_list:
+            for name, value in delta.named_parameters():
+                if delta.name == 'lora' and ('lora' not in name):
+                    continue
+                setattr(value, '__is_delta__', True)
+        
         if self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
             and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order):
             print('Create Virtual Adapters')
@@ -3312,8 +3293,11 @@ class TransformerSentenceEncoderLayer(nn.Module):
             self.virtual_modules = np.array(self.virtual_modules)
             self.virtual_list = nn.ModuleList(self.virtual_modules)
 
-            for virtual_p in self.virtual_list.parameters():
-                setattr(virtual_p, '__is_virtual__', True)            
+            for virtual_delta in self.virtual_list:
+                for name, value in virtual_delta.named_parameters():
+                    if virtual_delta.name == 'lora' and ('lora' not in name):
+                        continue
+                    setattr(value, '__is_virtual__', True)
 
     def copy_params(self):
         for i in range(len(self.virtual_modules)):

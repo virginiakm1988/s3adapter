@@ -719,7 +719,7 @@ class AdapterSwitch(nn.Module):
             unused_index = (z_hat < 0.5).nonzero()
             weights[unused_index] = 0.0
             if torch.sum(weights) == 0.0:
-                # logger.info(f'layer {self.layer_idx}: none has been chosen, z_hat = {z_hat}, use the path with the largest p')
+                logger.info(f'layer {self.layer_idx}: none has been chosen, z_hat = {z_hat}, use the path with the largest p')
                 max_idx = torch.argmax(self.p)
                 weights[max_idx] = 1 - self.p[max_idx].detach() + self.p[max_idx]
             weights = weights.unsqueeze(0)

@@ -151,8 +151,9 @@ class Runner():
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.init_steps}")
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.steps}, {self.adapter_config.adapter.switch.tau.stop_value}")
         
-        self.do_virtual = self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
+        self.do_virtual = self.stage == 1 and self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
             and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order)
+        linelogger.info(f'do_virtual: {self.do_virtual}, stage = {self.stage}, switch.stage = {self.adapter_config.adapter.switch.stage}')
         if self.do_virtual:
             assert not (self.adapter_config.adapter.switch.algo.second_order and not self.adapter_config.adapter.switch.algo.first_order),\
             "Second order should be calculated when first order is enable."
@@ -177,12 +178,12 @@ class Runner():
     def _load_weight(self, model, name):
         init_weight = self.init_ckpt.get(name) if not 'optimizer' in name else self.init_ckpt.get('Optimizer')
         
-        if init_weight:
-            show(f'[Runner] - Loading {name} weights from the previous experiment')
-            if 'optimizer' in name:
-                model.load_state_dict(init_weight[name])
-            else:
-                model.load_state_dict(init_weight)
+        # if init_weight:
+        #     show(f'[Runner] - Loading {name} weights from the previous experiment')
+        #     if 'optimizer' in name:
+        #         model.load_state_dict(init_weight[name])
+        #     else:
+        #         model.load_state_dict(init_weight)
         
         if name == "Upstream":
             if "prefix" in sys.argv[-1]:
@@ -201,6 +202,8 @@ class Runner():
                     model_dict.update(adapter_weight)
                     model.load_state_dict(model_dict)
                 else:
+                    for name, _ in model.named_parameters():
+                        linelogger.info(name)
                     upstream_weight = self.init_ckpt.get('Upstream')
                     if upstream_weight:
                         show(f'[Runner] - Loading {"Adapter"} weights & switch logits from the stage1 experiment')
@@ -216,6 +219,7 @@ class Runner():
                                 model_dict.update({para: value})
                         model.load_state_dict(model_dict)
         elif name == 'Downstream':
+            return
             downstream_weight = self.init_ckpt.get('Downstream')
             if downstream_weight:
                 show(f'[Runner] - Loading downstream weights from the previous experiment')
@@ -446,7 +450,6 @@ class Runner():
                 self.downstream.model.module.adapterConfig.adapter.switch.ratio = 0
             else:
                 self.downstream.model.adapterConfig.adapter.switch.ratio = 0
-
             self.upstream.model.train()
             self.featurizer.model.train()
     

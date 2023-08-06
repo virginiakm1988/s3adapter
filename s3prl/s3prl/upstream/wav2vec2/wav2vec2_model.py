@@ -3287,7 +3287,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                     continue
                 setattr(value, '__is_delta__', True)
         
-        if self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
+        if self.adapter_config.adapter.switch.stage == 1 and self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
             and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order):
             print('Create Virtual Adapters')
             self.virtual_modules = [delta_modules[adapter_name](self) for adapter_name in self.used_adapter]

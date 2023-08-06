@@ -11,6 +11,7 @@ from pathlib import Path
 from copy import deepcopy
 from itertools import zip_longest, islice
 import torch.optim._functional as optim_F
+import json
 
 import torch
 import torchaudio
@@ -166,7 +167,7 @@ class Runner():
             wandb.init(
                 project=f'{self.args.upstream}-{self.args.downstream}', 
                 mode="online" if self.args.online else "disabled", 
-                name=f'{self.args.search_algo}, {int(self.args.stage1_ratio * 100)}% search, lr {self.config["optimizer"]["lr"]}'
+                name=f'{self.args.search_algo}, {int(self.args.stage1_ratio * 100)}% search, lr {self.config["optimizer"]["lr"]}' if not self.adapter_config.adapter.switch.baseline else f'{self.args.search_algo} retrain'
             )
             newArg = self.args
             newArg.config = self.config
@@ -440,12 +441,13 @@ class Runner():
                 self.featurizer.model.train()
         elif stage == 2:
             if self.adapter_config.adapter.switch.algo.name == 's3delta':
-                self.upstream.model.set_hard_forward_structure(max_num_param=self.adapter_config.adapter.switch.algo.para_budget)
+                self.upstream.model.set_hard_forward_structure(max_num_param=self.adapter_config.adapter.switch.algo.para_budget, baseline=self.adapter_config.adapter.switch.baseline)
             if isinstance(self.downstream.model, DDP):
                 self.downstream.model.module.adapterConfig.adapter.switch.ratio = 0
             else:
                 self.downstream.model.adapterConfig.adapter.switch.ratio = 0
 
+            self.upstream.model.train()
             self.featurizer.model.train()
     
     @ddprecod
@@ -698,6 +700,14 @@ class Runner():
                     check_ckpt_num(self.args.expdir)
                     save_names.append(f'states-{global_step}.ckpt')
 
+                    # Dump current structure to folder 'exp_name'
+                    with open(os.path.join(self.args.expdir, 'architecture.json'), 'w') as f:
+                        architect = {}
+                        for layer in self.upstream.model.get_layers:
+                            architect.update({layer.adapterswitch.layer_idx: [layer.adapterswitch.used_adapter[idx] for idx in layer.adapterswitch.fixed_idx]})
+                        architect = json.dumps(architect, indent=4)
+                        print(architect, file=f)
+
                 if len(save_names) > 0:
                     all_states = {
                         'Optimizer': {
@@ -754,7 +764,7 @@ class Runner():
 
     def model_forward(self, data: dict, train_split, records, specaug=None, use_last=True):
         # forward data to the whole pipeline
-        if self.adapter_config.adapter.switch.algo.name == 's3delta':
+        if self.adapter_config.adapter.switch.algo.name == 's3delta' and not self.adapter_config.adapter.switch.baseline:
             self.upstream.model.compute_shifted_sigmoid(
                 max_num_param=self.adapter_config.adapter.switch.algo.para_budget, 
                 tau=self.adapter_config.adapter.switch.algo.sigmoid_tau,
@@ -1048,7 +1058,7 @@ class Runner():
             logger = SummaryWriter(tempdir)
 
         if self.adapter_config.adapter.switch.algo.name == 's3delta':
-            self.upstream.model.set_hard_forward_structure(max_num_param=self.adapter_config.adapter.switch.algo.para_budget)
+            self.upstream.model.set_hard_forward_structure(max_num_param=self.adapter_config.adapter.switch.algo.para_budget, baseline=self.adapter_config.adapter.switch.baseline)
 
         # fix seed to guarantee the same evaluation protocol across steps 
         random.seed(self.args.seed)

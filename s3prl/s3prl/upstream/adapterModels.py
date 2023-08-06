@@ -608,20 +608,34 @@ class AdapterSwitch(nn.Module):
         if self.config.algo.name not in ['fair_darts', 's3delta']:
             initial_logits = ([1. / len(self.paths)] * len(self.paths) if not (self.config.baseline) 
                             else [int(i == self.config.baseline[layer_idx]) for i in range(len(self.paths))])
+        elif self.config.algo.name == 'fair_darts':
+            if not self.config.baseline:
+                initial_logits = [0. for _ in range(len(self.paths))]
+                self.initial_logits = torch.sigmoid(torch.FloatTensor(initial_logits))
+            else:
+                initial_logits = [int(i == self.config.baseline[layer_idx]) for i in range(len(self.paths))]
         else:
-            initial_logits = [0. for _ in range(len(self.paths))]
-            self.initial_logits = torch.sigmoid(torch.FloatTensor(initial_logits))
+            if not self.config.baseline:
+                initial_logits = [0. for _ in range(len(self.paths))]
+                self.initial_logits = torch.sigmoid(torch.FloatTensor(initial_logits))
+            else:
+                initial_logits = [int(i in self.config.baseline[layer_idx]) for i in range(len(self.paths))]
 
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.FloatTensor(initial_logits))
                 )
-        logger.info(f'initial_logits: {torch.sigmoid(self.switch_logits) if self.config.algo.name in ["fair_darts", "s3delta"] else self.switch_logits}')
+
+        if not self.config.baseline:
+            logger.info(f'initial_logits: {torch.sigmoid(self.switch_logits) if self.config.algo.name in ["fair_darts", "s3delta"] else self.switch_logits}')
+        else:
+            logger.info(f'initial_logits: {self.switch_logits}')
+
         logger.info(f"paths = {len(initial_logits)}")
 
         self.prev_mode = None
-        self.fixed_idx = None #len(initial_logits)
+        self.fixed_idx = None if not self.config.baseline else self.paths
         self.used_adapter = used_adapter_name
-        # For algorithms sampling noise from GUmbel distribution
+        # For algorithms sampling noise from Gumbel distribution
         if self.config.algo.use_gumbel:
             self.gumbel_noise = None
         if self.config.algo.name == 's3delta':
@@ -646,17 +660,15 @@ class AdapterSwitch(nn.Module):
         self.training = (mode and self.config.stage != 2)
         if not self.training:
             if self.config.algo.name != 's3delta':
-                self.fixed_idx = self.get_arch()
-            # self.soft_logits = torch.softmax(self.switch_logits / self.switch_temperature[0], -1)
-            if not self.fixed_idx:
-                logger.info(f'layer_{self.layer_idx} did not have any adapters, use skip connection.')
+                self.fixed_idx = self.get_arch()    # s3delta will call set_hard_forward_structure() in upstream_expert.
+            if self.fixed_idx:
+                logger.info(f'current adapter of layer_{self.layer_idx}: {[self.used_adapter[idx] for idx in self.fixed_idx]}')
             else:
-                for idx in self.fixed_idx:
-                    logger.info(f'current adapter of layer_{self.layer_idx}: {self.used_adapter[idx]}')
+                logger.info(f'There\'s no current adapter of layer_{self.layer_idx}. Use skip by default.')
         else:
             pass
             # self.fixed_idx = None
-        if self.config.algo.name in ['fair_darts', 's3delta']:
+        if self.config.algo.name in ['fair_darts', 's3delta'] and not self.config.baseline:
             self.initial_logits = self.initial_logits.to(self.switch_logits.device)
         
         return super().train(mode)
@@ -724,86 +736,6 @@ class AdapterSwitch(nn.Module):
 
         return weights, torch.argmax(weights[0], dim=-1)
 
-    def forward_at_branch_lora(self, x):
-        x = x.transpose(0, 1)
-        batch_size = 1 #x.shape[0]
-        num_classes = (self.switch_logits.shape)[-1]
-        # print('477', self.switch_logits)
-        self.switch_mode()
-        
-        if self.config.strategy == 'global':
-            sample_size = [batch_size, num_classes]
-        else:
-            raise NotImplementedError
-
-        # Sample from Gumbel.
-
-        # self.reduce_tau()
-
-        g = self.gumbel.sample(sample_size).to(self.probs.device)
-
-        # Compute the weights of the convex sum.
-        weights = torch.softmax((g + self.switch_logits) / self.switch_temperature[0], dim=-1)
-        # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
-        
-        if self.hard and (self.switch_logits.requires_grad or not self.config.soft_adapter):
-            y_hard = Gumbel.onehot_from_logits(weights)
-            #print(y_hard[0], "random")
-            weights = (y_hard - weights).detach() + weights
-        
-        # weights = torch.nn.functional.gumbel_softmax(logits=self.switch_logits.expand(sample_size).to(self.probs.device), tau=self.switch_temperature, hard=(self.hard))
-        # Compute the output.
-        return weights[0], torch.argmax(weights[0], dim=-1)
-            
-    def forward_(self, x):
-        x = x.transpose(0, 1)
-        batch_size, seq_length, num_classes, hidden_dim_size = x.size()
-        # print('477', self.switch_logits)
-        self.switch_mode()
-        if not self.training or self.config.stage == 2 or (self.fixed_idx < len(self.switch_logits) and self.probs[self.fixed_idx] > self.config.fix_thres):
-            assert(self.fixed_idx < len(self.switch_logits))
-            if self.probs[self.fixed_idx] > self.config.fix_thres:
-                logging.warning(f"fixed_idx = {self.fixed_idx}, probs = {self.probs[self.fixed_idx]}")
-                
-            self.switch_logits.requires_grad = False
-            # logger.info(f'{x.shape},  {self.fixed_idx} {x[:, :, self.fixed_idx, :].shape}')
-            return x[:, :, self.fixed_idx, :].transpose(0, 1)
-
-        if self.config.strategy == 'global':
-            sample_size = [batch_size, num_classes]
-        elif self.config.strategy == 'seq_length':
-            sample_size = [batch_size, seq_length, num_classes]
-        else:
-            sample_size = [batch_size, seq_length, hidden_dim_size, num_classes]
-
-        # Sample from Gumbel.
-
-        # self.reduce_tau()
-
-        g = self.gumbel.sample(sample_size).to(self.probs.device)
-
-        # Compute the weights of the convex sum.
-        weights = torch.softmax((g + self.switch_logits) / self.switch_temperature[0], dim=-1)
-        # weights = Gumbel.gumbel_softmax(self.switch_logits, temperature=self.switch_temperature, hard=(not self.training), shape=sample_size)
-        
-        if self.hard and (self.switch_logits.requires_grad or not self.config.soft_adapter):
-            y_hard = Gumbel.onehot_from_logits(weights)
-            #print(y_hard[0], "random")
-            weights = (y_hard - weights).detach() + weights
-        
-        # weights = torch.nn.functional.gumbel_softmax(logits=self.switch_logits.expand(sample_size).to(self.probs.device), tau=self.switch_temperature, hard=(self.hard))
-        # Compute the output.
-        if self.config.strategy == 'global':
-            y = torch.einsum('ijkl,ik->ijl', x, weights)
-        elif self.config.strategy == 'seq_length':
-            y = torch.einsum('ijkl,ijk->ijl', x, weights)
-        else:
-            y = torch.einsum('ijkl,ijlk->ijl', x, weights)
-
-        # logger.info(f"{y[0]}\n{y.shape}\n{weights}")
-        # print('458', x.shape, y.shape, y.transpose(0, 1).shape)
-        return y.transpose(0, 1)
-    
     def reduce_tau(self):
         # tau_before = self.switch_temperature[0]
         if self.config.tau.type == 'linear':
@@ -911,7 +843,7 @@ class PAdapter(nn.Module):
     
     @property
     def num_parameter(self):
-        return self.num_param /1e6
+        return (self.num_param / 1e6)
     
     def forward(self, x, parent, **kwargs):
         residual = x
@@ -1038,7 +970,7 @@ class LoRAAdapter(nn.Module):
         self.name = 'lora'
         self.lora_keys = ['q_proj', 'v_proj']
         self.attn = self.layer_result = None
-        self.num_param = sum(p.nelement() for p in self.parameters())
+        self.num_param = sum(p.nelement() for n, p in self.named_parameters() if 'lora' in n)
     
     @property
     def num_parameter(self):
@@ -1107,11 +1039,11 @@ class LNFitAdapter(nn.Module):
 
         self.name = 'lnfit'
         self.attn = self.layer_result = None
-        self.num_param = sum(p.nelement() for p in self.parameters()) / 1e6
+        self.num_param = sum(p.nelement() for p in self.parameters())
     
     @property
     def num_parameter(self):
-        return self.num_param
+        return self.num_param / 1e6
     
     def forward(self, x, parent, **kwargs):
         self_attn_mask = kwargs['self_attn_mask']
@@ -1276,6 +1208,8 @@ class Skip(nn.Module):
             # self.add_module(name, module)
         self.activation_fn = parentModule.activation_fn
         self.layer_result = self.attn = None
+
+        self.name = 'skip'
     
     def forward(self, x, parent, **kwargs):
         residual = x

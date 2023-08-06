@@ -3244,8 +3244,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
         
         # adapter configs...      
         self.adapter_config = adapter_config
-        self.used_adapter = self.adapter_config.adapter.type
-
+        self.used_adapter = self.adapter_config.adapter.type if not self.adapter_config.adapter.switch.baseline \
+                            else [self.adapter_config.adapter.type[idx] for idx in self.adapter_config.adapter.switch.baseline[layer_idx]]
+        
         assert not(self.adapter_config.adapter.switch.algo.name == 's3delta' and 'skip' in self.used_adapter), \
             "Skip should not be an candidate in adapter when running s3delta!"
 
@@ -3275,7 +3276,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         }
         self.delta_modules = [delta_modules[adapter_name](self) for adapter_name in self.used_adapter]
         self.skip_connection = Skip(self) if self.adapter_config.adapter.switch.algo.name == 's3delta' else None
-
+        
         self.delta_modules = np.array(self.delta_modules)
         self.curr_modules = self.delta_modules
         self.delta_list = nn.ModuleList(self.delta_modules)
@@ -3322,10 +3323,6 @@ class TransformerSentenceEncoderLayer(nn.Module):
         LayerNorm is applied either before or after the self-attention/ffn
         modules similar to the original Transformer imlementation.
         """
-        # residual = x
-        # adapter_output = parallel_output = None
-        # parallel_input = x
-        # logging.warning(f"{residual.shape}")
         if self.layer_norm_first:
             raise NotImplementedError("Layer Norm First should be implemented.")
             x = self.self_attn_layer_norm(x)
@@ -3451,64 +3448,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
                         att_args=att_args
                     )
             
-            return x, (attn, layer_result)
-            normal_output, lora_output, bitfit_output = self.self_attn(
-                query=x,
-                key=x,
-                value=x,
-                key_padding_mask=self_attn_padding_mask,
-                need_weights=False,
-            )
-
-            if self.use_lora:
-                lora_output = self.lora_forward(lora_output, residual)
-
-            if self.use_bitfit:
-                bitfit_output = self.bitfit_forward(bitfit_output, residual)
-
-            x, attn = normal_output
-
-            x = self.dropout1(x)
-            x = residual + x
-
-            if self.use_lnfit:
-                lnfit_output = self.lnfit_forward(x, None)
-
-            x = self.self_attn_layer_norm(x)
-
-            residual = x
-            x = self.activation_fn(self.fc1(x))
-            #
-            adapter_input = x
-            #
-            x = self.dropout2(x)
-            x = self.fc2(x)
-            #
-            houlsby_input = x
-            #
-            layer_result = x
-
-            x = self.dropout3(x)
-
-            # next line need to be fixed if we add adapterbias, adapter_output is overwritten.
-            if self.adapter_config.adapter.exist and 'adapterbias' in self.adapter_config.adapter.type:  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
-                adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
-                x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
-                parallel_output = self.adapter_vector * self.adapter_alpha(residual)
-            elif 'houlsby' in self.adapter_config.adapter.type: # 'houlsby' in sys.argv[-1]:
-                adapter_output = self.seq_adapter(houlsby_input)
-                x = x + residual # +  self.seq_adapter(houlsby_input)
-                parallel_output = self.parallel_adapter(parallel_input)
-            else:
-                x = x + residual
-            
-            if adapter_output is not None:
-                if self.use_lora:
-                    adapterStack = torch.stack([x + adapter_output, x, x + parallel_output, lora_output], -2)[:,:,self.adapter_config.adapter.switch.path,:]
-                else:
-                    adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapter_config.adapter.switch.path,:]
-                x = self.adapterswitch(adapterStack)
-            x = self.final_layer_norm(x)
+            return x, (attn, layer_result)            
 
         return x, (attn, layer_result)
 

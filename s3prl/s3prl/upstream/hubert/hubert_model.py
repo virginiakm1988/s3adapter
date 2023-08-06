@@ -617,10 +617,10 @@ class HubertModel(torch.nn.Module):
             alphas.extend(layer.adapterswitch.parameters())
         return alphas
     
-    # @functools.cached_property
+    @functools.cached_property
     def param_nums(self):
         all_param_nums = []
         for layer in self.encoder.layers:
             for delta_module in layer.delta_modules:
-                all_param_nums.append(sum(p.nelement() for p in delta_module.parameters()) / 1e6)
+                all_param_nums.append(delta_module.num_parameter)
         return all_param_nums

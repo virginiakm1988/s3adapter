@@ -65,7 +65,7 @@ class UpstreamExpert(UpstreamBase):
     def compute_zeta(self, max_num_param: float, tau: float, eps=1e-7):
         flatten_alpha = torch.stack(self.model.all_alpha(), dim=0).view(-1).tolist()
         alphas = np.array(flatten_alpha)
-        param_nums = np.array(self.model.param_nums())
+        param_nums = np.array(self.model.param_nums)
         def func(zeta):
             x = (alphas - zeta) / tau
             x[x < -200] = -200
@@ -99,7 +99,11 @@ class UpstreamExpert(UpstreamBase):
             layer.adapterswitch.p = sigmoid_x[idx] * norm
             # print(f'layer_{idx}.p = {layer.adapterswitch.p}')
 
-    def set_hard_forward_structure(self, max_num_param: float):
+    def set_hard_forward_structure(self, max_num_param: float, baseline=None):
+        if baseline:
+            for layer_idx, layer in enumerate(self.model.encoder.layers):
+                layer.adapterswitch.fixed_idx = layer.adapterswitch.paths
+            return
         # shape: [num_layers, num_path]
         all_alpha = torch.stack(self.model.all_alpha(), dim=0)
         all_alpha = [
@@ -113,10 +117,11 @@ class UpstreamExpert(UpstreamBase):
         selected_path = [[] for _ in range(len(self.model.encoder.layers))]
         for alpha in all_alpha:
             layer_idx, path_idx = alpha[0], alpha[1]
-            num_param = self.model.encoder.layers[layer_idx].delta_list[path_idx].num_param
+            num_param = self.model.encoder.layers[layer_idx].delta_list[path_idx].num_parameter
             if curr_num_param + num_param <= max_num_param:
                 selected_path[layer_idx].append(path_idx)
                 curr_num_param += num_param
+        print(f'[upstream/hubert/expert.py]: current number of parameters: {curr_num_param}')
         
         for layer_idx, layer in enumerate(self.model.encoder.layers):
             layer.adapterswitch.fixed_idx = sorted(selected_path[layer_idx])

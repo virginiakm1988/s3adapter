@@ -109,7 +109,6 @@ class Runner():
         show(self.args)
         self.config = config
 
-        self.stage2_ckpt = torch.load(self.args.stage2_ckpt, map_location='cpu') if self.args.stage2_ckpt else {}
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
 
         '''
@@ -122,8 +121,9 @@ class Runner():
         
         self.adapterDict = {'adapter': config['adapter_config']}
         self.adapter_config = dict2obj(self.adapterDict)
-        self.adapter_config.adapter.switch.baseline = is_baseline(self.adapter_config.adapter.switch.baseline)
         
+        self.prepare_baseline()
+
         if self.args.mode == 'train':
             # train both stage1 and stage2
             self.stage1_steps = int(self.args.stage1_ratio * self.config['runner']['total_steps'] * (not self.adapter_config.adapter.switch.baseline) // 2)
@@ -165,10 +165,13 @@ class Runner():
 
         # init wandb
         if is_leader_process():
+            wandb_name = f'{self.args.search_algo}, {int(self.args.stage1_ratio * 100)}% search, lr {self.config["optimizer"]["lr"]}' if not self.adapter_config.adapter.switch.baseline else f'{self.args.search_algo} retrain'
+            if self.args.random_exp:
+                wandb_name = f'random exp {self.args.rand_seq}, budget={self.adapter_config.adapter.switch.algo.para_budget}'
             wandb.init(
                 project=f'{self.args.upstream}-{self.args.downstream}', 
                 mode="online" if self.args.online else "disabled", 
-                name=f'{self.args.search_algo}, {int(self.args.stage1_ratio * 100)}% search, lr {self.config["optimizer"]["lr"]}' if not self.adapter_config.adapter.switch.baseline else f'{self.args.search_algo} retrain'
+                name=wandb_name
             )
             newArg = self.args
             newArg.config = self.config
@@ -178,12 +181,12 @@ class Runner():
     def _load_weight(self, model, name):
         init_weight = self.init_ckpt.get(name) if not 'optimizer' in name else self.init_ckpt.get('Optimizer')
         
-        # if init_weight:
-        #     show(f'[Runner] - Loading {name} weights from the previous experiment')
-        #     if 'optimizer' in name:
-        #         model.load_state_dict(init_weight[name])
-        #     else:
-        #         model.load_state_dict(init_weight)
+        if init_weight:
+            show(f'[Runner] - Loading {name} weights from the previous experiment')
+            if 'optimizer' in name:
+                model.load_state_dict(init_weight[name])
+            else:
+                model.load_state_dict(init_weight)
         
         if name == "Upstream":
             if "prefix" in sys.argv[-1]:
@@ -195,39 +198,12 @@ class Runner():
                     model_dict.update(prompt_weight)
                     model.load_state_dict(model_dict)
             if self.args.adapter:
-                adapter_weight = None# self.init_ckpt.get('adapter')
+                adapter_weight = self.init_ckpt.get('adapter')
                 if adapter_weight:
                     show(f'[Runner] - Loading {"Adapter"} weights & switch logits from the previous experiment')
                     model_dict = model.state_dict()
                     model_dict.update(adapter_weight)
                     model.load_state_dict(model_dict)
-                else:
-                    for name, _ in model.named_parameters():
-                        linelogger.info(name)
-                    upstream_weight = self.init_ckpt.get('Upstream')
-                    if upstream_weight:
-                        show(f'[Runner] - Loading {"Adapter"} weights & switch logits from the stage1 experiment')
-                        # init ckpt is given
-                        assert self.stage2_ckpt == {}, \
-                            "init_ckpt and stage2_ckpt shouldn't be provided simultaneously."
-                        
-                        model_dict = model.state_dict()
-                        for para, value in upstream_weight.items():
-                            if getattr(value, '__is_delta__', False) or getattr(value, '__is_switch__', False):
-                                if getattr(value, '__is_switch__', False) and self.adapter_config.adapter.switch.baseline:
-                                    continue
-                                model_dict.update({para: value})
-                        model.load_state_dict(model_dict)
-        elif name == 'Downstream':
-            return
-            downstream_weight = self.init_ckpt.get('Downstream')
-            if downstream_weight:
-                show(f'[Runner] - Loading downstream weights from the previous experiment')
-                model_dict = model.state_dict()
-                for para, value in downstream_weight.items():
-                    model_dict.update({para: value})
-                    show(f'{para}: {value}')
-                model.load_state_dict(model_dict)
                 
     def _init_model(self, model, name, trainable, interfaces=None):
         for interface in interfaces or []:
@@ -393,6 +369,34 @@ class Runner():
         model_card = MODEL_CARD_MARKDOWN.format(upstream_model=self.args.upstream)
         with open(os.path.join(path, "README.md"), "w") as f:
             f.write(model_card)
+    
+    def prepare_baseline(self):
+        if self.args.random_exp:
+            with open(self.args.rand_arch) as arch_f:
+                all_arch = json.load(arch_f)
+                arch = all_arch[str(self.args.rand_seq)]
+                baseline = [[] for _ in range(12)]
+                for layer_id, used_adapters in enumerate(arch):
+                    baseline[int(layer_id)] = [
+                        idx for idx, adapter_name in enumerate(self.adapter_config.adapter.type) 
+                        if adapter_name in used_adapters
+                    ]
+        elif self.args.mode == 'evaluate' and self.adapter_config.adapter.switch.algo.name == 's3delta':
+            assert self.init_ckpt, 'Should provide a checkpoint for evaluation'
+            arch_path = os.path.join(os.path.dirname(self.args.init_ckpt), 'architecture.json')
+            if os.path.exists(arch_path):
+                baseline = [[] for _ in range(12)]
+                with open(arch_path, 'r') as arch_f:
+                    arch = json.load(arch_f)
+                    for layer_id, used_adapters in arch.items():
+                        baseline[int(layer_id)] = [
+                            idx for idx, adapter_name in enumerate(self.adapter_config.adapter.type) 
+                            if adapter_name in used_adapters
+                        ]
+        else:
+            baseline = self.adapter_config.adapter.switch.baseline
+        
+        self.adapter_config.adapter.switch.baseline = is_baseline(baseline)
 
     def fetch_dataloader(self, mode: str):
         return self.downstream.model.get_dataloader(mode)
@@ -578,8 +582,12 @@ class Runner():
         self.prepare_stage(self.stage)
         dataloaders, iters = self.prepare_dataloader(train_split, adapterModes, epoch)
 
-        self.stage_steps_prefix = [self.stage1_steps, self.config['runner']['total_steps']]
         gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
+        self.stage_steps_prefix = [self.stage1_steps, self.config['runner']['total_steps']]
+        if self.args.random_exp:
+            self.stage_steps_prefix = [0, math.ceil(len(dataloaders['train'])/gradient_accumulate_steps)]
+            self.config['runner']['total_steps'] = self.stage_steps_prefix[-1]
+        
         while pbar.n < self.config['runner']['total_steps']:
             if self.stage == 1 and pbar.n >= self.stage_steps_prefix[self.stage - 1]:
                 self.prepare_stage(2)
@@ -667,7 +675,7 @@ class Runner():
                     continue
 
                 # logging
-                if global_step % self.config['runner']['log_step'] == 0:
+                if global_step % self.config['runner']['log_step'] == 0 or global_step + 1 == self.config['runner']['total_steps']:
                     layers, norm_weights = self.upstream.model.get_layers, self.featurizer.model.get_norm_weights
                     self.downstream.model.log_records(
                         train_split,
@@ -688,11 +696,11 @@ class Runner():
                 # evaluation and save checkpoint
                 save_names = []
 
-                if global_step % self.config['runner']['eval_step'] == 0:
+                if global_step % self.config['runner']['eval_step'] == 0 or global_step + 1 == self.config['runner']['total_steps']:
                     for split in self.config['runner']['eval_dataloaders']:
                         save_names += self.evaluate(split, logger, global_step)
 
-                if global_step % self.config['runner']['save_step'] == 0:
+                if global_step % self.config['runner']['save_step'] == 0 or global_step + 1 == self.config['runner']['total_steps']:
                     def check_ckpt_num(directory):
                         max_keep = self.config['runner']['max_keep']
                         ckpt_pths = glob.glob(f'{directory}/states-*.ckpt')

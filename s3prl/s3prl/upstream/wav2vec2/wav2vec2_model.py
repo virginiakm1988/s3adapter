@@ -3244,6 +3244,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         
         # adapter configs...      
         self.adapter_config = adapter_config
+        # print(f'baseline = {self.adapter_config.adapter.switch.baseline[layer_idx]}')
         self.used_adapter = self.adapter_config.adapter.type if not self.adapter_config.adapter.switch.baseline \
                             else [self.adapter_config.adapter.type[idx] for idx in self.adapter_config.adapter.switch.baseline[layer_idx]]
         

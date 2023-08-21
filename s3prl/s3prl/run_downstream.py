@@ -34,13 +34,14 @@ def get_downstream_args():
     # number of steps in stage1 = stage1_ratio * total_steps
     parser.add_argument('--stage1_ratio', type=float, default=0.0)
     parser.add_argument('--online', action='store_true')
-    # Enable weighted sum
-    parser.add_argument('--stage2_ckpt', default=None)
     # Architecture search algorithm
     parser.add_argument('--search_algo', type=str, 
                         help='Specified algorithm for architecture search. Default algorithm is GDAS.', 
                         default='gdas', 
                         choices=['gdas', 'darts', 'fair_darts', 'gumbel_darts', 's3delta'])
+    parser.add_argument('--random_exp', action='store_true', help='Run random experiment for adapter placement')
+    parser.add_argument('--rand_seq', type=int, default=0)
+    parser.add_argument('--rand_arch', default='random_exp/rand.json')
     # distributed training
     parser.add_argument('--backend', default='nccl', help='The backend for distributed training')
     parser.add_argument('--local_rank', type=int,

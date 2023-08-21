@@ -530,11 +530,14 @@ def is_baseline(baseline):
 
     if(type(baseline) == list):
         assert(len(baseline) == 12)
+        if type(baseline[0]) is not list:
+            for i, b in enumerate(baseline):
+                baseline[i] = [b]
         return baseline
     else:
         if baseline < 0:
             return 0
-        return [baseline] * 12
+        return [[baseline] for _ in range(12)]
     
 
 class MyLogger:

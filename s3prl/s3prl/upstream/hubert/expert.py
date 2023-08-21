@@ -162,7 +162,7 @@ class UpstreamExpert(UpstreamBase):
     
     @property
     def get_named_parameters(self):
-        return self.model.named_parameters()
+        return self.named_parameters()
 
     def forward(self, wavs):
         if self.task_cfg.normalize:

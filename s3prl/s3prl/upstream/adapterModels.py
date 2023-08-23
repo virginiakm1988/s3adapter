@@ -593,6 +593,7 @@ class AdapterSwitch(nn.Module):
         config: object = None,
         initial_logits: List[float] = None,
         layer_idx: int = None,
+        all_adapter_type: List[str] = None,
         used_adapter_name: List[str] = None
     ):
         super().__init__()
@@ -622,7 +623,7 @@ class AdapterSwitch(nn.Module):
                 initial_logits = [0. for _ in range(len(self.paths))]
                 self.initial_logits = torch.sigmoid(torch.FloatTensor(initial_logits))
             else:
-                initial_logits = [int(i in self.config.baseline[layer_idx]) for i in range(len(self.paths))]
+                initial_logits = [int(all_adapter_type.index(adapter_name) in self.config.baseline[layer_idx]) for adapter_name in used_adapter_name]
 
         self.register_parameter(
                     'switch_logits', nn.Parameter(torch.FloatTensor(initial_logits))

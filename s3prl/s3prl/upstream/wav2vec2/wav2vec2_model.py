@@ -3261,6 +3261,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
         self.adapterswitch = AdapterSwitch(
             config=self.adapter_config.adapter.switch, 
             layer_idx=layer_idx, 
+            all_adapter_type=self.adapter_config.adapter.type,
             used_adapter_name=self.used_adapter
         )
         for p in self.adapterswitch.parameters():

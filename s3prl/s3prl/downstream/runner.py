@@ -167,7 +167,7 @@ class Runner():
         if is_leader_process():
             wandb_name = f'{self.args.search_algo}, {int(self.args.stage1_ratio * 100)}% search, lr {self.config["optimizer"]["lr"]}' if not self.adapter_config.adapter.switch.baseline else f'{self.args.search_algo} retrain'
             if self.args.random_exp:
-                wandb_name = f'random exp {self.args.rand_seq}, budget={self.adapter_config.adapter.switch.algo.para_budget}'
+                wandb_name = f'random exp {self.args.rand_seq}, budget={self.adapter_config.adapter.switch.algo.para_budget}, lr_rescheduled'
             wandb.init(
                 project=f'{self.args.upstream}-{self.args.downstream}', 
                 mode="online" if self.args.online else "disabled", 
@@ -502,6 +502,7 @@ class Runner():
                         param.requires_grad = False
                 trainable_paras += list(additional_weight)
                 linelogger.info("Numbers of adapter PARAMETER: %.2fM" % (adapter_param/1e6))
+                wandb.config.update({'num_trainable_parameters': adapter_param/1e6})
             elif entry.trainable:
                 for name, param in entry.model.named_parameters():
                     if getattr(param, '__is_virtual__', False):

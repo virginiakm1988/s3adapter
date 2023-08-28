@@ -27,7 +27,7 @@ def get_downstream_args():
     parser = argparse.ArgumentParser()
 
     # train or test for this experiment
-    parser.add_argument('-m', '--mode', choices=['train', 'train_stage1', 'train_stage2', 'evaluate', 'inference'], required=True)
+    parser.add_argument('-m', '--mode', choices=['train', 'train_stage1', 'train_stage2', 'synflow', 'gen_weight', 'evaluate', 'inference'], required=True)
     parser.add_argument('-t', '--evaluate_split', default='test')
     parser.add_argument('-o', '--override', help='Used to override args and config, this is at the highest priority')
 

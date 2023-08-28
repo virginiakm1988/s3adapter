@@ -292,6 +292,9 @@ class DownstreamExpert(nn.Module):
         features, labels = self._match_length(features, labels)
         predicted = self.curr_model(features)
 
+        if 'return_predicted' in kwargs and kwargs['return_predicted']:
+            return predicted
+
         # cause logits are in (batch, seq, class) and labels are in (batch, seq)
         # nn.CrossEntropyLoss expect to have (N, class) and (N,) as input
         # here we flatten logits and labels in order to apply nn.CrossEntropyLoss

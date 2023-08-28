@@ -151,8 +151,10 @@ class Runner():
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.init_steps}")
         linelogger.info(f"{self.adapter_config.adapter.switch.tau.steps}, {self.adapter_config.adapter.switch.tau.stop_value}")
         
-        self.do_virtual = self.stage == 1 and self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
-            and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order)
+        self.do_virtual = not self.adapter_config.adapter.switch.baseline and \
+            self.stage == 1 and self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
+                and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order)
+        
         linelogger.info(f'do_virtual: {self.do_virtual}, stage = {self.stage}, switch.stage = {self.adapter_config.adapter.switch.stage}')
         if self.do_virtual:
             assert not (self.adapter_config.adapter.switch.algo.second_order and not self.adapter_config.adapter.switch.algo.first_order),\
@@ -167,7 +169,7 @@ class Runner():
         if is_leader_process():
             wandb_name = f'{self.args.search_algo}, {int(self.args.stage1_ratio * 100)}% search, lr {self.config["optimizer"]["lr"]}' if not self.adapter_config.adapter.switch.baseline else f'{self.args.search_algo} retrain'
             if self.args.random_exp:
-                wandb_name = f'random exp {self.args.rand_seq}, budget={self.adapter_config.adapter.switch.algo.para_budget}, lr_rescheduled'
+                wandb_name = f'random exp {self.args.rand_seq}, budget={self.adapter_config.adapter.switch.algo.para_budget}, lr_rescheduled, same initialization'
             wandb.init(
                 project=f'{self.args.upstream}-{self.args.downstream}', 
                 mode="online" if self.args.online else "disabled", 
@@ -186,7 +188,9 @@ class Runner():
             if 'optimizer' in name:
                 model.load_state_dict(init_weight[name])
             else:
-                model.load_state_dict(init_weight)
+                model_dict = model.state_dict()
+                model_dict.update(init_weight)
+                model.load_state_dict(model_dict)
         
         if name == "Upstream":
             if "prefix" in sys.argv[-1]:
@@ -204,6 +208,23 @@ class Runner():
                     model_dict = model.state_dict()
                     model_dict.update(adapter_weight)
                     model.load_state_dict(model_dict)
+        
+        if self.args.random_exp:
+            init_weight = torch.load(f'random_exp/{self.args.downstream}/init_weights.ckpt')
+            if name == 'Upstream':
+                show(f'[Runner] - Loading {name} initialize weights')
+                for layer in model.get_layers:
+                    for adapter in layer.delta_list:
+                        adapter_dict = adapter.state_dict()
+                        init_dict = deepcopy(init_weight['adapters'][adapter.name])
+                        adapter_dict.update(init_dict)
+                        adapter.load_state_dict(adapter_dict)
+            elif name == 'Downstream':
+                show(f'[Runner] - Loading {name} initialize weights')
+                downstream_dict = model.state_dict()
+                downstream_dict.update(deepcopy(init_weight['downstream']))
+                model.load_state_dict(downstream_dict)
+
                 
     def _init_model(self, model, name, trainable, interfaces=None):
         for interface in interfaces or []:
@@ -457,6 +478,30 @@ class Runner():
             self.upstream.model.train()
             self.featurizer.model.train()
     
+    def gen_weight(self):
+        """
+        Generate weights for adpater modules and downstream model, 
+        only used for the initialization consistency in random_exp
+        """
+        weights = {
+            'adapters': {},
+            'downstream': {}
+        }
+        for adapter in self.upstream.model.get_layers[0].delta_list:
+            adapter_dict = adapter.state_dict()
+            if adapter.name == 'lora':
+                # print(adapter_dict)
+                keys = [key for key in adapter_dict.keys() if 'lora' not in key]
+                for key in keys:
+                    del adapter_dict[key]
+            
+            weights['adapters'][adapter.name] = adapter_dict
+            
+        weights['downstream'] = self.downstream.model.state_dict()
+        if not os.path.exists(f'random_exp/{self.args.downstream}'):
+            os.mkdir(f'random_exp/{self.args.downstream}')
+        torch.save(weights, f'random_exp/{self.args.downstream}/init_weights.ckpt')
+
     @ddprecod
     def train(self):
         # trainable parameters and train/eval mode
@@ -774,7 +819,7 @@ class Runner():
             logger.close()
             wandb.finish()
 
-    def model_forward(self, data: dict, train_split, records, specaug=None, use_last=True):
+    def model_forward(self, data: dict, train_split, records, specaug=None, use_last=True, return_predicted=False):
         # forward data to the whole pipeline
         if self.adapter_config.adapter.switch.algo.name == 's3delta' and not self.adapter_config.adapter.switch.baseline:
             self.upstream.model.compute_shifted_sigmoid(
@@ -792,13 +837,15 @@ class Runner():
         features = self.featurizer.model(wavs, features)
         if specaug:
             features, _ = specaug(features)
-        loss = self.downstream.model(
+        if self.args.mode == 'synflow':
+            return features[0]
+        output = self.downstream.model(
             train_split,
             features, *data['others'],
             records = records,
+            return_predicted = return_predicted # If set to True, then Downstream will return output_logits, rather than loss
         )
-
-        return loss
+        return output
 
     def use_virtual(self):
         for entry in self.all_entries:
@@ -1058,7 +1105,49 @@ class Runner():
             scheduler.step()
 
         return batch_ids, batch_id
+    
+    def synflow(self, split=None, logger=None):
+        # fix seed to guarantee the same evaluation protocol across steps 
+        random.seed(self.args.seed)
+        np.random.seed(self.args.seed)
+        torch.manual_seed(self.args.seed)
         
+        if self.adapter_config.adapter.switch.algo.name == 's3delta':
+            self.upstream.model.set_hard_forward_structure(max_num_param=self.adapter_config.adapter.switch.algo.para_budget, baseline=self.adapter_config.adapter.switch.baseline)
+
+        for entry in self.all_entries:
+            # set the sign of parameters to positive
+            if entry.name != 'Upstream':
+                continue
+            for name, param in entry.model.named_parameters():
+                if 'encoder' in name:
+                    setattr(param, 'cal_synflow', True)
+                    print(f'cal synflow on {name}')
+                    param.requires_grad = False
+                    param.abs_()
+                    param.requires_grad = True
+
+        train_split = self.config['runner'].get("train_dataloader", "train")
+        records = defaultdict()
+        
+        data = {'wavs': [[1 for _ in range(400)]], 'others': [np.array([[0]]), [400], 0]}
+        out = self.model_forward(data, train_split, records, return_predicted=True)
+        torch.sum(out).backward()
+
+        sum_grads = 0
+        for entry in self.all_entries:
+            for name, param in entry.model.named_parameters():
+                if getattr(param, 'cal_synflow', False) and param.grad is not None:
+                    sum_grads += torch.sum(torch.abs(param * param.grad))
+        
+        linelogger.info(f'synflow: {sum_grads}')
+        with open('synflow.csv', 'a') as syn_f:
+            print(f'{self.args.rand_seq},{sum_grads}', file=syn_f)
+        if self.args.online:
+            wandb.log({'synflow': sum_grads})
+
+        return
+
     def evaluate(self, split=None, logger=None, global_step=0):
         """evaluate function will always be called on a single process even during distributed training"""
 

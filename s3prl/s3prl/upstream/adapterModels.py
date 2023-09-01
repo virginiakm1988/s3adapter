@@ -976,9 +976,17 @@ class LoRAAdapter(nn.Module):
         self.attn = self.layer_result = None
         self.num_param = sum(p.nelement() for n, p in self.named_parameters() if 'lora' in n)
     
+        self.re_init()
+
     @property
     def num_parameter(self):
         return self.num_param / 1e6
+
+    def re_init(self):
+        ref = {key: getattr(self, key, None) for key in self.lora_keys}
+        for key in self.lora_keys:
+            nn.init.normal_(ref[key].lora_A, mean=0.0, std=(1/ref[key].lora_A.shape[1]))
+            nn.init.normal_(ref[key].lora_B, mean=0.0, std=(1/ref[key].lora_A.shape[0]))
 
     def lora_weights(self):
         ref = {key: getattr(self, key, None) for key in self.lora_keys}
@@ -1153,6 +1161,8 @@ class BitFitAdapter(nn.Module):
                 parent, lastKey, child = find_module(parentModule, name)
                 setattr(self, f'{name.split(".")[-2]}_bitfit_bias', nn.Parameter(torch.zeros_like(child)))
         
+        self.re_init()
+        
         self.name = 'bitfit'
         self.layer_result = self.attn = None
         self.num_param = sum(p.nelement() for p in self.parameters())
@@ -1160,6 +1170,11 @@ class BitFitAdapter(nn.Module):
     @property
     def num_parameter(self):
         return self.num_param / 1e6
+
+    def re_init(self):
+        for name, param in self.named_parameters():
+            print(f'{name}: {param}, {param.shape}')
+            nn.init.uniform_(param, a=(-1/param.shape[0]), b=(1/param.shape[0]))
 
     def bitfit_weights(self):
         return {

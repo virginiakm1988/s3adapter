@@ -837,8 +837,7 @@ class Runner():
         features = self.featurizer.model(wavs, features)
         if specaug:
             features, _ = specaug(features)
-        if self.args.mode == 'synflow':
-            return features[0]
+        
         output = self.downstream.model(
             train_split,
             features, *data['others'],
@@ -1117,15 +1116,12 @@ class Runner():
 
         for entry in self.all_entries:
             # set the sign of parameters to positive
-            if entry.name != 'Upstream':
-                continue
             for name, param in entry.model.named_parameters():
-                if 'encoder' in name:
-                    setattr(param, 'cal_synflow', True)
-                    print(f'cal synflow on {name}')
-                    param.requires_grad = False
-                    param.abs_()
-                    param.requires_grad = True
+                setattr(param, 'cal_synflow', True)
+                print(f'cal synflow on {name}')
+                param.requires_grad = False
+                param.abs_()
+                param.requires_grad = True
 
         train_split = self.config['runner'].get("train_dataloader", "train")
         records = defaultdict()

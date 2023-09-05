@@ -1,5 +1,6 @@
 from typing import List
 import math
+from math import sqrt
 
 import torch
 from torch import nn
@@ -827,7 +828,7 @@ class Gumbel:
         return y
     
 class PAdapter(nn.Module):
-    def __init__(self, parentModule: nn.Module) -> None:
+    def __init__(self, parentModule: nn.Module, re_init=False) -> None:
         super().__init__()
         
         for name, module in parentModule.named_children():
@@ -856,38 +857,66 @@ class PAdapter(nn.Module):
         self_attn_padding_mask = kwargs['self_attn_padding_mask']
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
-        x, self.attn = parent.self_attn(
-            query=x,
-            key=x,
-            value=x,
-            key_padding_mask=self_attn_padding_mask,
-            need_weights=False,
-        )
+        layer_norm_first = kwargs['layer_norm_first']
+        if layer_norm_first:
+            x = parent.self_attn_layer_norm(x)
+            x, self.attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+            )
 
-        x = parent.dropout1(x)
-        x = residual + x
+            x = parent.dropout1(x)
+            x = residual + x
 
-        x = parent.self_attn_layer_norm(x)
-
-        residual = x
-        x = parent.activation_fn(parent.fc1(x))
-        #
-        x = parent.dropout2(x)
-        x = parent.fc2(x)
-        #
-        self.layer_result = x
-
-        x = parent.dropout3(x)
-        adapter_output = self.adapter(parallel_input)
+            residual = x
+            x = parent.final_layer_norm(x)
+            x = parent.activation_fn(parent.fc1(x))
             
-        x = x + adapter_output + residual
-        # return x
-        x = parent.final_layer_norm(x)
+            x = parent.dropout2(x)
+            x = parent.fc2(x)
+            
+            self.layer_result = x
+
+            x = parent.dropout3(x)
+            adapter_output = self.adapter(parallel_input)
+                
+            x = x + adapter_output + residual
+        else:
+            x, self.attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+            )
+
+            x = parent.dropout1(x)
+            x = residual + x
+
+            x = parent.self_attn_layer_norm(x)
+
+            residual = x
+            x = parent.activation_fn(parent.fc1(x))
+            
+            x = parent.dropout2(x)
+            x = parent.fc2(x)
+            
+            self.layer_result = x
+
+            x = parent.dropout3(x)
+            adapter_output = self.adapter(parallel_input)
+                
+            x = x + adapter_output + residual
+            
+            x = parent.final_layer_norm(x)
 
         return x, (self.attn, self.layer_result)
 
 class SAdapter(nn.Module):
-    def __init__(self, parentModule: nn.Module) -> None:
+    def __init__(self, parentModule: nn.Module, re_init=False) -> None:
         super().__init__()
         
         for name, module in parentModule.named_children():
@@ -916,35 +945,62 @@ class SAdapter(nn.Module):
         self_attn_padding_mask = kwargs['self_attn_padding_mask']
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
-        x, self.attn = parent.self_attn(
-            query=x,
-            key=x,
-            value=x,
-            key_padding_mask=self_attn_padding_mask,
-            need_weights=False,
-        )
+        layer_norm_first = kwargs['layer_norm_first']
+        if layer_norm_first:
+            x = parent.self_attn_layer_norm(x)
 
-        x = parent.dropout1(x)
-        x = residual + x
+            x, self.attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+            )
 
-        x = parent.self_attn_layer_norm(x)
+            x = parent.dropout1(x)
+            x = residual + x
 
-        residual = x
-        x = parent.activation_fn(parent.fc1(x))
-        #
-        x = parent.dropout2(x)
-        x = parent.fc2(x)
-        #
-        houlsby_input = x
-        #
-        self.layer_result = x
-
-        x = parent.dropout3(x)
-        adapter_output = self.adapter(houlsby_input)
+            residual = x
+            x = parent.final_layer_norm(x)
+            x = parent.activation_fn(parent.fc1(x))
             
-        x = x + adapter_output + residual
-        # return x
-        x = parent.final_layer_norm(x)
+            x = parent.dropout2(x)
+            x = parent.fc2(x)
+            
+            houlsby_input = x
+            self.layer_result = x
+
+            x = parent.dropout3(x)
+            adapter_output = self.adapter(houlsby_input)
+            x = x + adapter_output + residual
+        else:
+            x, self.attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+            )
+
+            x = parent.dropout1(x)
+            x = residual + x
+
+            x = parent.self_attn_layer_norm(x)
+
+            residual = x
+            x = parent.activation_fn(parent.fc1(x))
+            
+            x = parent.dropout2(x)
+            x = parent.fc2(x)
+            
+            houlsby_input = x
+            self.layer_result = x
+
+            x = parent.dropout3(x)
+            adapter_output = self.adapter(houlsby_input)
+            x = x + adapter_output + residual
+
+            x = parent.final_layer_norm(x)
 
         return x, (self.attn, self.layer_result)
 
@@ -952,7 +1008,7 @@ class SAdapter(nn.Module):
 
 class LoRAAdapter(nn.Module):
     # Use LoRA for q_proj and v_proj in MultiHeadAttention
-    def __init__(self, parentModule: nn.Module):
+    def __init__(self, parentModule: nn.Module, re_init=False):
         super().__init__()
         for name, module in parentModule.named_children():
             # self.add_module(name, module)
@@ -975,8 +1031,9 @@ class LoRAAdapter(nn.Module):
         self.lora_keys = ['q_proj', 'v_proj']
         self.attn = self.layer_result = None
         self.num_param = sum(p.nelement() for n, p in self.named_parameters() if 'lora' in n)
-    
-        self.re_init()
+
+        if re_init:
+            self.re_init()
 
     @property
     def num_parameter(self):
@@ -985,8 +1042,8 @@ class LoRAAdapter(nn.Module):
     def re_init(self):
         ref = {key: getattr(self, key, None) for key in self.lora_keys}
         for key in self.lora_keys:
-            nn.init.normal_(ref[key].lora_A, mean=0.0, std=(1/ref[key].lora_A.shape[1]))
-            nn.init.normal_(ref[key].lora_B, mean=0.0, std=(1/ref[key].lora_A.shape[0]))
+            nn.init.normal_(ref[key].lora_A, mean=0.0, std=sqrt(1/sqrt(ref[key].lora_A.shape[1])))
+            nn.init.normal_(ref[key].lora_B, mean=0.0, std=sqrt(1/sqrt(ref[key].lora_A.shape[0])))
 
     def lora_weights(self):
         ref = {key: getattr(self, key, None) for key in self.lora_keys}
@@ -1008,33 +1065,62 @@ class LoRAAdapter(nn.Module):
         self_attn_padding_mask = kwargs['self_attn_padding_mask']
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
+        layer_norm_first = kwargs['layer_norm_first']
         # Start forward
         residual = x
-        lora_out, self.attn = parent.self_attn(
-            query=x,
-            key=x,
-            value=x,
-            key_padding_mask=self_attn_padding_mask,
-            need_weights=False,
-            use_lora=True,
-            lora_weights = self.lora_weights(),
-            lora_scaling = self.lora_scaling()
-        )
+        if layer_norm_first:
+            x = parent.self_attn_layer_norm(x)
 
-        lora_out = parent.dropout1(lora_out)
-        lora_out = residual + lora_out
-        lora_out = parent.self_attn_layer_norm(lora_out)
+            lora_out, self.attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+                use_lora=True,
+                lora_weights = self.lora_weights(),
+                lora_scaling = self.lora_scaling()
+            )
 
-        residual = lora_out
-        lora_out = parent.activation_fn(parent.fc1(lora_out))
-        lora_out = parent.dropout2(lora_out)
+            lora_out = parent.dropout1(lora_out)
+            lora_out = residual + lora_out
 
-        lora_out = parent.fc2(lora_out)
-        self.layer_result = lora_out
-        lora_out = parent.dropout3(lora_out)
+            residual = lora_out
+            lora_out = parent.final_layer_norm(lora_out)
+            lora_out = parent.activation_fn(parent.fc1(lora_out))
+            
+            lora_out = parent.dropout2(lora_out)
+            lora_out = parent.fc2(lora_out)
 
-        lora_out = lora_out + residual
-        lora_out = parent.final_layer_norm(lora_out)
+            self.layer_result = lora_out
+            lora_out = parent.dropout3(lora_out)
+            lora_out = lora_out + residual
+        else:
+            lora_out, self.attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+                use_lora=True,
+                lora_weights = self.lora_weights(),
+                lora_scaling = self.lora_scaling()
+            )
+
+            lora_out = parent.dropout1(lora_out)
+            lora_out = residual + lora_out
+            lora_out = parent.self_attn_layer_norm(lora_out)
+
+            residual = lora_out
+            lora_out = parent.activation_fn(parent.fc1(lora_out))
+            lora_out = parent.dropout2(lora_out)
+
+            lora_out = parent.fc2(lora_out)
+            self.layer_result = lora_out
+            lora_out = parent.dropout3(lora_out)
+
+            lora_out = lora_out + residual
+            lora_out = parent.final_layer_norm(lora_out)
 
         return lora_out, (self.attn, self.layer_result)
 
@@ -1062,30 +1148,34 @@ class LNFitAdapter(nn.Module):
         self_attn_padding_mask = kwargs['self_attn_padding_mask']
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
+        layer_norm_first = kwargs['layer_norm_first']
         # Start
         residual = x
-        lnfit_out, self.attn = parent.self_attn(
-            query=x,
-            key=x,
-            value=x,
-            key_padding_mask=self_attn_padding_mask,
-            need_weights=False
-        )
+        if layer_norm_first:
+            raise NotImplementedError()
+        else:
+            lnfit_out, self.attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False
+            )
 
-        lnfit_out = parent.dropout1(lnfit_out)
-        lnfit_out = residual + lnfit_out
-        lnfit_out = self.lnfit_self_attn_layer_norm(lnfit_out)
+            lnfit_out = parent.dropout1(lnfit_out)
+            lnfit_out = residual + lnfit_out
+            lnfit_out = self.lnfit_self_attn_layer_norm(lnfit_out)
 
-        residual = lnfit_out
-        lnfit_out = parent.activation_fn(parent.fc1(lnfit_out))
-        lnfit_out = parent.dropout2(lnfit_out)
+            residual = lnfit_out
+            lnfit_out = parent.activation_fn(parent.fc1(lnfit_out))
+            lnfit_out = parent.dropout2(lnfit_out)
 
-        lnfit_out = parent.fc2(lnfit_out)
-        self.layer_result = lnfit_out
-        lnfit_out = parent.dropout3(lnfit_out)
+            lnfit_out = parent.fc2(lnfit_out)
+            self.layer_result = lnfit_out
+            lnfit_out = parent.dropout3(lnfit_out)
 
-        lnfit_out = lnfit_out + residual
-        lnfit_out = self.lnfit_final_layer_norm(lnfit_out)
+            lnfit_out = lnfit_out + residual
+            lnfit_out = self.lnfit_final_layer_norm(lnfit_out)
 
         return lnfit_out, (self.attn, self.layer_result)
     
@@ -1148,7 +1238,7 @@ def find_module(root_module: nn.Module, key:str):
 
 
 class BitFitAdapter(nn.Module):
-    def __init__(self, parentModule: nn.Module):
+    def __init__(self, parentModule: nn.Module, re_init=False):
         super().__init__()
         for name, module in parentModule.named_children():
             pass
@@ -1161,7 +1251,8 @@ class BitFitAdapter(nn.Module):
                 parent, lastKey, child = find_module(parentModule, name)
                 setattr(self, f'{name.split(".")[-2]}_bitfit_bias', nn.Parameter(torch.zeros_like(child)))
         
-        self.re_init()
+        if re_init:
+            self.re_init()
         
         self.name = 'bitfit'
         self.layer_result = self.attn = None
@@ -1173,7 +1264,7 @@ class BitFitAdapter(nn.Module):
 
     def re_init(self):
         for name, param in self.named_parameters():
-            print(f'{name}: {param}, {param.shape}')
+            # print(f'{name}: {param}, {param.shape}')
             nn.init.uniform_(param, a=(-1/param.shape[0]), b=(1/param.shape[0]))
 
     def bitfit_weights(self):
@@ -1190,37 +1281,66 @@ class BitFitAdapter(nn.Module):
         self_attn_padding_mask = kwargs['self_attn_padding_mask']
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
+        layer_norm_first = kwargs['layer_norm_first']
         # Start forward
         residual = x
-        bitfit_out, self.attn = parent.self_attn(
-            query=x,
-            key=x,
-            value=x,
-            key_padding_mask=self_attn_padding_mask,
-            need_weights=False,
-            use_bitfit=True,
-            bitfit_weights=self.bitfit_weights(),
-        )
+        if layer_norm_first:
+            x = parent.self_attn_layer_norm(x) + self.self_attn_layer_norm_bitfit_bias
 
-        bitfit_out = parent.dropout1(bitfit_out)
-        bitfit_out = residual + bitfit_out
-        bitfit_out = parent.self_attn_layer_norm(bitfit_out) + self.self_attn_layer_norm_bitfit_bias
+            bitfit_out, self.attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+                use_bitfit=True,
+                bitfit_weights=self.bitfit_weights(),
+            )
 
-        residual = bitfit_out
-        bitfit_out = parent.activation_fn(parent.fc1(bitfit_out) + self.fc1_bitfit_bias)
-        bitfit_out = parent.dropout2(bitfit_out)
+            bitfit_out = parent.dropout1(bitfit_out)
+            bitfit_out = residual + bitfit_out
 
-        bitfit_out = parent.fc2(bitfit_out) + self.fc2_bitfit_bias
-        self.layer_result = bitfit_out
-        bitfit_out = parent.dropout3(bitfit_out)
+            residual = bitfit_out
+            bitfit_out = parent.final_layer_norm(bitfit_out) + self.final_layer_norm_bitfit_bias
+            bitfit_out = parent.activation_fn(parent.fc1(bitfit_out) + self.fc1_bitfit_bias)
+            
+            bitfit_out = parent.dropout2(bitfit_out)
+            bitfit_out = parent.fc2(bitfit_out) + self.fc2_bitfit_bias
+            
+            self.layer_result = bitfit_out
+            bitfit_out = parent.dropout3(bitfit_out)
 
-        bitfit_out = bitfit_out + residual
-        bitfit_out = parent.final_layer_norm(bitfit_out) + self.final_layer_norm_bitfit_bias
+            bitfit_out = bitfit_out + residual
+        else:
+            bitfit_out, self.attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+                use_bitfit=True,
+                bitfit_weights=self.bitfit_weights(),
+            )
+
+            bitfit_out = parent.dropout1(bitfit_out)
+            bitfit_out = residual + bitfit_out
+            bitfit_out = parent.self_attn_layer_norm(bitfit_out) + self.self_attn_layer_norm_bitfit_bias
+
+            residual = bitfit_out
+            bitfit_out = parent.activation_fn(parent.fc1(bitfit_out) + self.fc1_bitfit_bias)
+            bitfit_out = parent.dropout2(bitfit_out)
+
+            bitfit_out = parent.fc2(bitfit_out) + self.fc2_bitfit_bias
+            self.layer_result = bitfit_out
+            bitfit_out = parent.dropout3(bitfit_out)
+
+            bitfit_out = bitfit_out + residual
+            bitfit_out = parent.final_layer_norm(bitfit_out) + self.final_layer_norm_bitfit_bias
 
         return bitfit_out, (self.attn, self.layer_result)
     
 class Skip(nn.Module):
-    def __init__(self, parentModule: nn.Module):
+    def __init__(self, parentModule: nn.Module, re_init=False):
         super().__init__()
         for name, module in parentModule.named_children():
             pass
@@ -1236,31 +1356,62 @@ class Skip(nn.Module):
         self_attn_padding_mask = kwargs['self_attn_padding_mask']
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
+        layer_norm_first = kwargs['layer_norm_first']
         # Start forward
         residual = x
-        skip_out, skip_attn = parent.self_attn(
-            query=x,
-            key=x,
-            value=x,
-            key_padding_mask=self_attn_padding_mask,
-            need_weights=False,
-        )
+        if layer_norm_first:
+            x = parent.self_attn_layer_norm(x)
 
-        skip_out = parent.dropout1(skip_out)
-        skip_out = residual + skip_out
-        skip_out = parent.self_attn_layer_norm(skip_out)
+            skip_out, skip_attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+            )
 
-        residual = skip_out
-        skip_out = parent.activation_fn(parent.fc1(skip_out))
-        skip_out = parent.dropout2(skip_out)
+            skip_out = parent.dropout1(skip_out)
+            skip_out = residual + skip_out
 
-        skip_out = parent.fc2(skip_out)
-        layer_result = skip_out
-        self.attn = skip_attn
-        self.layer_result = layer_result
-        skip_out = parent.dropout3(skip_out)
+            residual = skip_out
+            skip_out = parent.final_layer_norm(skip_out)
+            skip_out = parent.activation_fn(parent.fc1(skip_out))
 
-        skip_out = skip_out + residual
-        skip_out = parent.final_layer_norm(skip_out)
+            skip_out = parent.dropout2(skip_out)
+            skip_out = parent.fc2(skip_out)
+
+            layer_result = skip_out
+            self.attn = skip_attn
+            self.layer_result = layer_result
+
+            skip_out = parent.dropout3(skip_out)
+
+            skip_out = skip_out + residual
+        else:
+            skip_out, skip_attn = parent.self_attn(
+                query=x,
+                key=x,
+                value=x,
+                key_padding_mask=self_attn_padding_mask,
+                need_weights=False,
+            )
+
+            skip_out = parent.dropout1(skip_out)
+            skip_out = residual + skip_out
+            skip_out = parent.self_attn_layer_norm(skip_out)
+
+            residual = skip_out
+            skip_out = parent.activation_fn(parent.fc1(skip_out))
+            skip_out = parent.dropout2(skip_out)
+
+            skip_out = parent.fc2(skip_out)
+            layer_result = skip_out
+
+            self.attn = skip_attn
+            self.layer_result = layer_result
+
+            skip_out = parent.dropout3(skip_out)
+            skip_out = skip_out + residual
+            skip_out = parent.final_layer_norm(skip_out)
 
         return skip_out, (skip_attn, layer_result)

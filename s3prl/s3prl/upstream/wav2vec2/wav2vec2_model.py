@@ -3276,7 +3276,13 @@ class TransformerSentenceEncoderLayer(nn.Module):
             'lnfit': LNFitAdapter,
             'bitfit': BitFitAdapter
         }
-        self.delta_modules = [delta_modules[adapter_name](self) for adapter_name in self.used_adapter]
+        self.delta_modules = [
+            delta_modules[adapter_name](
+                self, 
+                re_init=self.adapter_config.adapter.switch.algo.re_init
+            ) 
+            for adapter_name in self.used_adapter
+        ]
         self.skip_connection = Skip(self) if self.adapter_config.adapter.switch.algo.name == 's3delta' else None
         
         self.delta_modules = np.array(self.delta_modules)
@@ -3293,7 +3299,13 @@ class TransformerSentenceEncoderLayer(nn.Module):
             self.adapter_config.adapter.switch.stage == 1 and self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
                 and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order):
             print('Create Virtual Adapters')
-            self.virtual_modules = [delta_modules[adapter_name](self) for adapter_name in self.used_adapter]
+            self.virtual_modules = [
+                delta_modules[adapter_name](
+                    self, 
+                    re_init=self.adapter_config.adapter.switch.algo.re_init
+                ) 
+                for adapter_name in self.used_adapter
+            ]
             self.virtual_modules = np.array(self.virtual_modules)
             self.virtual_list = nn.ModuleList(self.virtual_modules)
 
@@ -3326,134 +3338,86 @@ class TransformerSentenceEncoderLayer(nn.Module):
         LayerNorm is applied either before or after the self-attention/ffn
         modules similar to the original Transformer imlementation.
         """
-        if self.layer_norm_first:
-            raise NotImplementedError("Layer Norm First should be implemented.")
-            x = self.self_attn_layer_norm(x)
-            x, attn = self.self_attn(
-                query=x,
-                key=x,
-                value=x,
-                key_padding_mask=self_attn_padding_mask,
-                attn_mask=self_attn_mask,
-                need_weights=False,
-            )
-            x = self.dropout1(x)
-            x = residual + x
+        if self.adapter_config.adapter.switch.stage == 1 and self.adapterswitch.training:
+            weights, max_idx = self.adapterswitch()
+            if (not self.adapterswitch.switch_logits.requires_grad and self.adapter_config.adapter.switch.algo.soft_train) or \
+                (self.adapterswitch.switch_logits.requires_grad and self.adapter_config.adapter.switch.algo.soft_switch):
+                # Linear combination of all path's output with their corresponding weights
+                all_x, all_layer_result = [], []
+                for i, delta_module in enumerate(self.curr_modules):
+                    x_, (attn, layer_result_) = \
+                        delta_module(
+                            x,
+                            self,
+                            self_attn_mask=self_attn_mask,
+                            self_attn_padding_mask=self_attn_padding_mask,
+                            need_weights=need_weights,
+                            att_args=att_args,
+                            layer_norm_first=self.layer_norm_first
+                        )
+                    all_x.append(x_)
+                    all_layer_result.append(layer_result_)
+                
+                x = torch.stack(all_x, dim=-2)
+                layer_result = torch.stack(all_layer_result, dim=-2)
+                del all_x, all_layer_result
 
-            residual = x
-            x = self.final_layer_norm(x)
-            x = self.activation_fn(self.fc1(x))
-
-            #add adapter input
-            if self.adapter_config.adapter.exist:  #  'adapter' in sys.argv[-1]:
-                adapter_input = x
-
-            x = self.dropout2(x)
-            x = self.fc2(x)
-
-            #add adapter input
-            if self.adapter_config.adapter.houlsby.input:  #  'houlsby_input' in sys.argv[-1]:
-                houlsby_input = x
-
-            layer_result = x
-
-            x = self.dropout3(x)
-
-            ## 3374 remember NEED FIX!!!!!
-            if self.adapter_config.adapter.exist:
-                if 'adapterbias' in self.adapter_config.adapter.type:  # 'adapter' in sys.argv[-1] and 'houlsby' not in sys.argv[-1] and 'lora' not in sys.argv[-1]:
-                    adapter_output = self.adapter_vector  * self.adapter_alpha(adapter_input)
-                    x = x + residual # +  self.adapter_vector  * self.adapter_alpha(adapter_input)
-                    parallel_output = self.adapter_vector * self.adapter_alpha(residual)
-                if 'houlsby' in self.adapter_config.adapter.type: # 'houlsby' in sys.argv[-1]:
-                    adapter_output = self.seq_adapter(houlsby_input)
-                    x = x + residual # +  self.seq_adapter(houlsby_input)
-                    parallel_output = self.parallel_adapter(parallel_input)
-            else:
-                x = x + residual
-            
-            if adapter_output is not None:
-                adapterStack = torch.stack([x + adapter_output, x, x + parallel_output], -2)[:,:,self.adapter_config.adapter.switch.path,:]
-                x = self.adapterswitch(adapterStack)
-        else:
-            if self.adapter_config.adapter.switch.stage == 1 and self.adapterswitch.training:
-                weights, max_idx = self.adapterswitch()
-                if (not self.adapterswitch.switch_logits.requires_grad and self.adapter_config.adapter.switch.algo.soft_train) or \
-                    (self.adapterswitch.switch_logits.requires_grad and self.adapter_config.adapter.switch.algo.soft_switch):
-                    # Linear combination of all path's output with their corresponding weights
-                    all_x, all_layer_result = [], []
-                    for i, delta_module in enumerate(self.curr_modules):
-                        x_, (attn, layer_result_) = \
-                            delta_module(
-                                x,
-                                self,
-                                self_attn_mask=self_attn_mask,
-                                self_attn_padding_mask=self_attn_padding_mask,
-                                need_weights=need_weights,
-                                att_args=att_args
-                            )
-                        all_x.append(x_)
-                        all_layer_result.append(layer_result_)
-                    
-                    x = torch.stack(all_x, dim=-2)
-                    layer_result = torch.stack(all_layer_result, dim=-2)
-                    del all_x, all_layer_result
-
-                    if self.adapter_config.adapter.switch.strategy == 'global':
-                        x = torch.einsum('ijkl,ik->ijl', x, weights)
-                        layer_result = torch.einsum('ijkl,ik->ijl', layer_result, weights)
-                    elif self.adapter_config.adapter.switch.strategy == 'seq_length':
-                        x = torch.einsum('ijkl,ijk->ijl', x, weights)
-                        layer_result = torch.einsum('ijkl,ijk->ijl', layer_result, weights)
-                    else:
-                        x = torch.einsum('ijkl,ijlk->ijl', x, weights)
-                        layer_result = torch.einsum('ijkl,ijlk->ijl', layer_result, weights)
+                if self.adapter_config.adapter.switch.strategy == 'global':
+                    x = torch.einsum('ijkl,ik->ijl', x, weights)
+                    layer_result = torch.einsum('ijkl,ik->ijl', layer_result, weights)
+                elif self.adapter_config.adapter.switch.strategy == 'seq_length':
+                    x = torch.einsum('ijkl,ijk->ijl', x, weights)
+                    layer_result = torch.einsum('ijkl,ijk->ijl', layer_result, weights)
                 else:
-                    # Hard Forward
-                    all_x, all_layer_result = [], []
-                    for i, weight in enumerate(weights[0]):
-                        if weight > 0:
-                            x_, (attn, layer_result_) = self.curr_modules[i](
-                                x,  
-                                self, 
-                                self_attn_mask=self_attn_mask, 
-                                self_attn_padding_mask=self_attn_padding_mask, 
-                                need_weights=need_weights, 
-                                att_args=att_args
-                            )
-                            all_x.append(weight * x_)
-                            all_layer_result.append(weight * layer_result_)
-                    
-                    x = torch.stack(all_x, dim=0).sum(dim=0)
-                    layer_result = torch.stack(all_layer_result, dim=0).sum(dim=0)
+                    x = torch.einsum('ijkl,ijlk->ijl', x, weights)
+                    layer_result = torch.einsum('ijkl,ijlk->ijl', layer_result, weights)
             else:
-                # Stage 2
-                if self.adapterswitch.fixed_idx:
-                    all_x, all_layer_result = [], []
-                    for idx in self.adapterswitch.fixed_idx:
-                        x_, (attn, layer_result_) = self.curr_modules[idx](
-                            x, self, 
+                # Hard Forward
+                all_x, all_layer_result = [], []
+                for i, weight in enumerate(weights[0]):
+                    if weight > 0:
+                        x_, (attn, layer_result_) = self.curr_modules[i](
+                            x,  
+                            self, 
                             self_attn_mask=self_attn_mask, 
                             self_attn_padding_mask=self_attn_padding_mask, 
                             need_weights=need_weights, 
-                            att_args=att_args
+                            att_args=att_args,
+                            layer_norm_first=self.layer_norm_first
                         )
-                        all_x.append(x_)
-                        all_layer_result.append(layer_result_)
-                    x = torch.stack(all_x, dim=0).sum(dim=0)
-                    layer_result = torch.stack(all_layer_result, dim=0).sum(dim=0)
-                else:
-                    x, (attn, layer_result) = self.skip_connection(
+                        all_x.append(weight * x_)
+                        all_layer_result.append(weight * layer_result_)
+                
+                x = torch.stack(all_x, dim=0).sum(dim=0)
+                layer_result = torch.stack(all_layer_result, dim=0).sum(dim=0)
+        else:
+            # Stage 2
+            if self.adapterswitch.fixed_idx:
+                all_x, all_layer_result = [], []
+                for idx in self.adapterswitch.fixed_idx:
+                    x_, (attn, layer_result_) = self.curr_modules[idx](
                         x, self, 
                         self_attn_mask=self_attn_mask, 
                         self_attn_padding_mask=self_attn_padding_mask, 
                         need_weights=need_weights, 
-                        att_args=att_args
+                        att_args=att_args,
+                        layer_norm_first=self.layer_norm_first
                     )
+                    all_x.append(x_)
+                    all_layer_result.append(layer_result_)
+                x = torch.stack(all_x, dim=0).sum(dim=0)
+                layer_result = torch.stack(all_layer_result, dim=0).sum(dim=0)
+            else:
+                x, (attn, layer_result) = self.skip_connection(
+                    x, self,
+                    self_attn_mask=self_attn_mask,
+                    self_attn_padding_mask=self_attn_padding_mask,
+                    need_weights=need_weights,
+                    att_args=att_args,
+                    layer_norm_first=self.layer_norm_first
+                )
             
-            return x, (attn, layer_result)            
-
-        return x, (attn, layer_result)
+        return x, (attn, layer_result)        
 
     def aux_loss(self):
         return self.adapterswitch.aux_loss()

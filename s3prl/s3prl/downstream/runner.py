@@ -122,7 +122,7 @@ class Runner():
         self.adapterDict = {'adapter': config['adapter_config']}
         self.adapter_config = dict2obj(self.adapterDict)
         
-        self.prepare_baseline()
+        self.prepare_baseline(num_layers=(12 if not self.args.upstream == 'hubert_large_ll60k' else 24))
 
         if self.args.mode == 'train':
             # train both stage1 and stage2
@@ -160,6 +160,8 @@ class Runner():
             assert not (self.adapter_config.adapter.switch.algo.second_order and not self.adapter_config.adapter.switch.algo.first_order),\
             "Second order should be calculated when first order is enable."
 
+        self.adapter_config.adapter.switch.algo.re_init = self.args.random_exp
+
         self.upstream = self._get_upstream()
         self.featurizer = self._get_featurizer()
         self.downstream = self._get_downstream()
@@ -169,7 +171,7 @@ class Runner():
         if is_leader_process():
             wandb_name = f'{self.args.search_algo}, {int(self.args.stage1_ratio * 100)}% search, lr {self.config["optimizer"]["lr"]}' if not self.adapter_config.adapter.switch.baseline else f'{self.args.search_algo} retrain'
             if self.args.random_exp:
-                wandb_name = f'random exp {self.args.rand_seq}, budget={self.adapter_config.adapter.switch.algo.para_budget}, lr_rescheduled, same initialization'
+                wandb_name = f'random exp {self.args.rand_seq}, budget={self.adapter_config.adapter.switch.algo.para_budget}, lr_rescheduled, init by distribution 3'
             wandb.init(
                 project=f'{self.args.upstream}-{self.args.downstream}', 
                 mode="online" if self.args.online else "disabled", 
@@ -391,12 +393,12 @@ class Runner():
         with open(os.path.join(path, "README.md"), "w") as f:
             f.write(model_card)
     
-    def prepare_baseline(self):
+    def prepare_baseline(self, num_layers=12):
         if self.args.random_exp:
             with open(self.args.rand_arch) as arch_f:
                 all_arch = json.load(arch_f)
                 arch = all_arch[str(self.args.rand_seq)]
-                baseline = [[] for _ in range(12)]
+                baseline = [[] for _ in range(num_layers)]
                 for layer_id, used_adapters in enumerate(arch):
                     baseline[int(layer_id)] = [
                         idx for idx, adapter_name in enumerate(self.adapter_config.adapter.type) 
@@ -417,7 +419,7 @@ class Runner():
         else:
             baseline = self.adapter_config.adapter.switch.baseline
         
-        self.adapter_config.adapter.switch.baseline = is_baseline(baseline)
+        self.adapter_config.adapter.switch.baseline = is_baseline(baseline, num_layers)
 
     def fetch_dataloader(self, mode: str):
         return self.downstream.model.get_dataloader(mode)
@@ -547,12 +549,16 @@ class Runner():
                         param.requires_grad = False
                 trainable_paras += list(additional_weight)
                 linelogger.info("Numbers of adapter PARAMETER: %.2fM" % (adapter_param/1e6))
-                wandb.config.update({'num_trainable_parameters': adapter_param/1e6})
+                if self.args.online:
+                    wandb.config.update({'num_trainable_parameters': adapter_param/1e6})
             elif entry.trainable:
+                linelogger.info(f'{entry.name} trainable')
                 for name, param in entry.model.named_parameters():
                     if getattr(param, '__is_virtual__', False):
+                        linelogger.info(f'add {name} to v_paras')
                         trainable_v_paras.append(param)
                     else:
+                        linelogger.info(f'add {name} to w_paras')
                         trainable_w_paras.append(param)
             else:
                 linelogger.info(f'in eval: {entry.name}')
@@ -709,7 +715,7 @@ class Runner():
                     
                     batch_ids += curr_bids
                     batch_id = last_bid
-
+                # linelogger.info(f'norm_weights: {self.featurizer.model.get_norm_weights}')
                 if self.stage < 2 and self.adapter_config.adapter.switch.tau.type != "const":
                     self.upstream.model.reduce_tau()
                 
@@ -1143,6 +1149,61 @@ class Runner():
             wandb.log({'synflow': sum_grads})
 
         return
+
+    def naswot(self):
+        random.seed(self.args.seed)
+        np.random.seed(self.args.seed)
+        torch.manual_seed(self.args.seed)
+
+        epoch = self.init_ckpt.get('Epoch', {'train': 0, 'switch': 0})
+        train_split = self.config['runner'].get("train_dataloader", "train")
+        dataloaders, iters = self.prepare_dataloader(train_split, ["train"], epoch)
+        
+        gradient_accumulate_steps = self.config['runner'].get('gradient_accumulate_steps')
+        batch_size = len(next(iters['train']))
+        # effective_batch_size = batch_size * gradient_accumulate_steps
+        network_output = np.zeros((batch_size, batch_size))  
+
+        # reference: https://github.com/BayesWatch/nas-without-training/blob/master/score_networks.py#L98
+        def counting_forward_hook(module, inp, out):
+            try:
+                if not module.visited_backwards:
+                    return
+                if isinstance(inp, tuple):
+                    inp = inp[0]
+                inp = inp.view(inp.size(0), -1)
+                x = (inp > 0).float()
+                K = x @ x.t()
+                K2 = (1.-x) @ (1.-x.t())
+                network_output = network_output + K.cpu().numpy() + K2.cpu().numpy()
+            except:
+                pass
+
+        def counting_backward_hook(module, inp, out):
+            module.visited_backwards = True
+
+        for entry in self.all_entries:
+            # set the sign of parameters to positive
+            for name, param in entry.model.named_modules():
+                if 'ReLU' in str(type(module)):
+                    module.register_forward_hook(counting_forward_hook)
+                    module.register_backward_hook(counting_backward_hook)
+
+        try:
+            (wavs, *others) = next(iters['train'])
+        except StopIteration:
+            pass  # use all data
+
+        with torch.no_grad():
+            self.model_forward(data, train_split, defaultdict(list))
+
+        _, logdet = np.linalg.slogdet(network_output)
+        with open('naswot.csv', 'a') as naswot_f:
+            print(f'{self.args.rand_seq},{logdet}', file=naswot_f)
+        if self.args.online:
+            wandb.log({'naswot': logdet})
+        return
+
 
     def evaluate(self, split=None, logger=None, global_step=0):
         """evaluate function will always be called on a single process even during distributed training"""

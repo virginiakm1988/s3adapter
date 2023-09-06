@@ -526,11 +526,11 @@ def dict2obj(dict1):
     # method and custom object hook as arguments
     return json.loads(json.dumps(dict1), object_hook=obj)
 
-def is_baseline(baseline):        
+def is_baseline(baseline, num_layers=12):        
     logging.warning(type(baseline))
 
     if(type(baseline) == list):
-        assert(len(baseline) == 12)
+        assert(len(baseline) == num_layers)
         if type(baseline[0]) is not list:
             for i, b in enumerate(baseline):
                 baseline[i] = [b]
@@ -538,7 +538,7 @@ def is_baseline(baseline):
     else:
         if baseline < 0:
             return 0
-        return [[baseline] for _ in range(12)]
+        return [[baseline] for _ in range(num_layers)]
     
 
 class MyLogger:

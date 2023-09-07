@@ -653,8 +653,10 @@ class AdapterSwitch(nn.Module):
             return torch.sigmoid(self.switch_logits)
         elif self.config.algo.name == 's3delta':
             return self.p
-        else:
+        elif self.config.tau.type != 'const':
             return torch.softmax(self.switch_logits / self.switch_temperature[0], dim=-1)
+        else:
+            return torch.softmax(self.switch_logits, dim=-1)
 
     def get_arch(self):
         return [torch.argmax(self.switch_logits, dim=-1).item()]

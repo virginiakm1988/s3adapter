@@ -169,7 +169,7 @@ class DownstreamExpert(nn.Module):
             )
             results.update({f'{key_prefix}-aux_loss': average_aux_loss})
 
-            total_loss = results['loss'] + average_aux_loss
+            total_loss = results[f"{key_prefix}-loss"] + average_aux_loss
             logger.add_scalar(
                 f'{self._get_task_name()}/{key_prefix}-total_loss', total_loss, global_step=global_step
             )
@@ -187,12 +187,13 @@ class DownstreamExpert(nn.Module):
         if 'lr' in kwargs:
             results.update({"lr": kwargs["lr"]})
 
-        for metric in self.metrics:
-            log_key = f"{key_prefix}-{metric}"
-            results[log_key] = eval(metric)(
-                hypothesis=records["hypothesis"],
-                groundtruth=records["groundtruth"],
-            )
+        if records["hypothesis"] and records["groundtruth"]:
+            for metric in self.metrics:
+                log_key = f"{key_prefix}-{metric}"
+                results[log_key] = eval(metric)(
+                    hypothesis=records["hypothesis"],
+                    groundtruth=records["groundtruth"],
+                )
 
         if 'to_wandb' in kwargs and kwargs['to_wandb']:
             wandb.log(results, step=global_step)

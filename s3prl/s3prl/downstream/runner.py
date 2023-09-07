@@ -155,6 +155,8 @@ class Runner():
             self.stage == 1 and self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
                 and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order)
         
+        self.adapter_config.adapter.switch.algo.re_init = self.args.random_exp
+
         linelogger.info(f'do_virtual: {self.do_virtual}, stage = {self.stage}, switch.stage = {self.adapter_config.adapter.switch.stage}')
         if self.do_virtual:
             assert not (self.adapter_config.adapter.switch.algo.second_order and not self.adapter_config.adapter.switch.algo.first_order),\
@@ -408,7 +410,7 @@ class Runner():
             assert self.init_ckpt, 'Should provide a checkpoint for evaluation'
             arch_path = os.path.join(os.path.dirname(self.args.init_ckpt), 'architecture.json')
             if os.path.exists(arch_path):
-                baseline = [[] for _ in range(12)]
+                baseline = [[] for _ in range(24)]
                 with open(arch_path, 'r') as arch_f:
                     arch = json.load(arch_f)
                     for layer_id, used_adapters in arch.items():
@@ -549,7 +551,7 @@ class Runner():
                         param.requires_grad = False
                 trainable_paras += list(additional_weight)
                 linelogger.info("Numbers of adapter PARAMETER: %.2fM" % (adapter_param/1e6))
-                if self.args.online:
+                if is_leader_process() and self.args.online:
                     wandb.config.update({'num_trainable_parameters': adapter_param/1e6})
             elif entry.trainable:
                 linelogger.info(f'{entry.name} trainable')
@@ -617,7 +619,7 @@ class Runner():
         
         # Log initial tau, switch logits & norm_weight to wandb
         if is_leader_process() and self.args.online:
-            layers, norm_weights = self.upstream.model.get_layers, self.featurizer.model.get_norm_weights
+            layers, norm_weights = self.upstream.model.get_layers, self.featurizer.model.get_norm_weights()
             self.downstream.model.log_records(
                 train_split,
                 records = records,
@@ -728,7 +730,7 @@ class Runner():
 
                 # logging
                 if global_step % self.config['runner']['log_step'] == 0 or global_step + 1 == self.config['runner']['total_steps']:
-                    layers, norm_weights = self.upstream.model.get_layers, self.featurizer.model.get_norm_weights
+                    layers, norm_weights = self.upstream.model.get_layers, self.featurizer.model.get_norm_weights()
                     self.downstream.model.log_records(
                         train_split,
                         records = records,

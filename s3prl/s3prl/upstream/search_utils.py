@@ -10,6 +10,10 @@ def setup_algo(adapter_config: dict):
         adapter_config['switch']['algo']['first_order'] = True
         adapter_config['switch']['algo']['second_order'] = True
         adapter_config['switch']['algo']['use_gumbel'] = False
+
+        adapter_config['switch']['tau']['init_value'] = 1
+        adapter_config['switch']['tau']['stop_value'] = 1
+        adapter_config['switch']['tau']['type'] = 'const'
     elif algo_name == 'gdas':
         adapter_config['switch']['algo']['soft_train'] = False
         adapter_config['switch']['algo']['soft_switch'] = False

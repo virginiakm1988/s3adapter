@@ -227,7 +227,6 @@ class Featurizer(nn.Module):
         self.copy_params()
         self.curr_weights = self.virtual_weights
 
-    @property
     def get_norm_weights(self):
         return self.norm_weights.detach()
 

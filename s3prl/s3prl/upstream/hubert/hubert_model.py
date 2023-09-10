@@ -506,7 +506,7 @@ class HubertModel(torch.nn.Module):
         # x: (B, T, D), float
         # padding_mask: (B, T), bool
         # mask_indices: (B, T), bool
-        x = torch.ones_like(x).to(x.device)
+        
         x, _ = self.encoder(
             x,
             padding_mask=padding_mask,

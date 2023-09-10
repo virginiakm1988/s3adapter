@@ -1081,6 +1081,7 @@ class MultiheadAttention(nn.Module):
             assert key is not None and value is not None
 
             if self.use_xformers:
+                raise NotImplementedError
                 return self._xformers_attn_forward(
                     query, key, value, key_padding_mask, need_weights, attn_mask
                 ), None
@@ -3016,6 +3017,9 @@ class TransformerEncoder(nn.Module):
                 adapterConfig.temperature = customConfig.adapter.switch.tau.init_value
                 adapterConfig.tauType = customConfig.adapter.switch.tau.type
             ''' 
+        else:
+            customConfig = None
+        
         self.layers = nn.ModuleList(
             [self.build_encoder_layer(args, i, adapterConfig=customConfig) for i in range(args.encoder_layers)]
         )
@@ -3244,76 +3248,77 @@ class TransformerSentenceEncoderLayer(nn.Module):
         
         # adapter configs...      
         self.adapter_config = adapter_config
-        # print(f'baseline = {self.adapter_config.adapter.switch.baseline[layer_idx]}')
-        self.used_adapter = self.adapter_config.adapter.type if not self.adapter_config.adapter.switch.baseline \
-                            else [self.adapter_config.adapter.type[idx] for idx in self.adapter_config.adapter.switch.baseline[layer_idx]]
-        
-        assert not(self.adapter_config.adapter.switch.algo.name == 's3delta' and 'skip' in self.used_adapter), \
-            "Skip should not be an candidate in adapter when running s3delta!"
+        if adapter_config:
+            # print(f'baseline = {self.adapter_config.adapter.switch.baseline[layer_idx]}')
+            self.used_adapter = self.adapter_config.adapter.type if not self.adapter_config.adapter.switch.baseline \
+                                else [self.adapter_config.adapter.type[idx] for idx in self.adapter_config.adapter.switch.baseline[layer_idx]]
+            
+            assert not(self.adapter_config.adapter.switch.algo.name == 's3delta' and 'skip' in self.used_adapter), \
+                "Skip should not be an candidate in adapter when running s3delta!"
 
-        # Override adapteConfig.adapter.switch.path if the number of path is not equal to number of adapter used
-        if len(self.adapter_config.adapter.switch.path) != len(self.used_adapter):
-            self.adapter_config.adapter.switch.path = [i for i in range(len(self.used_adapter))]
-            print("Override adapter_config.adpater.switch.path")
-        print(f"Current used adapters: {self.used_adapter}")
-        print(f"Path index of adapters: {self.adapter_config.adapter.switch.path}")
+            # Override adapteConfig.adapter.switch.path if the number of path is not equal to number of adapter used
+            if len(self.adapter_config.adapter.switch.path) != len(self.used_adapter):
+                self.adapter_config.adapter.switch.path = [i for i in range(len(self.used_adapter))]
+                print("Override adapter_config.adpater.switch.path")
+            print(f"Current used adapters: {self.used_adapter}")
+            print(f"Path index of adapters: {self.adapter_config.adapter.switch.path}")
 
-        self.adapterswitch = AdapterSwitch(
-            config=self.adapter_config.adapter.switch, 
-            layer_idx=layer_idx, 
-            all_adapter_type=self.adapter_config.adapter.type,
-            used_adapter_name=self.used_adapter
-        )
-        for p in self.adapterswitch.parameters():
-            setattr(p, '__is_switch__', True)
-        # Adapters
-        self.adapter_idx = {e: i for i, e in enumerate(self.used_adapter)}
-        delta_modules = {
-            'skip': Skip, 
-            'seq': SAdapter, 
-            'para': PAdapter, 
-            'lora': LoRAAdapter, 
-            'lnfit': LNFitAdapter,
-            'bitfit': BitFitAdapter
-        }
-        self.delta_modules = [
-            delta_modules[adapter_name](
-                self, 
-                re_init=self.adapter_config.adapter.switch.algo.re_init
-            ) 
-            for adapter_name in self.used_adapter
-        ]
-        self.skip_connection = Skip(self) if self.adapter_config.adapter.switch.algo.name == 's3delta' else None
-        
-        self.delta_modules = np.array(self.delta_modules)
-        self.curr_modules = self.delta_modules
-        self.delta_list = nn.ModuleList(self.delta_modules)
-
-        for delta in self.delta_list:
-            for name, value in delta.named_parameters():
-                if delta.name == 'lora' and ('lora' not in name):
-                    continue
-                setattr(value, '__is_delta__', True)
-        
-        if not self.adapter_config.adapter.switch.baseline and \
-            self.adapter_config.adapter.switch.stage == 1 and self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
-                and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order):
-            print('Create Virtual Adapters')
-            self.virtual_modules = [
+            self.adapterswitch = AdapterSwitch(
+                config=self.adapter_config.adapter.switch, 
+                layer_idx=layer_idx, 
+                all_adapter_type=self.adapter_config.adapter.type,
+                used_adapter_name=self.used_adapter
+            )
+            for p in self.adapterswitch.parameters():
+                setattr(p, '__is_switch__', True)
+            # Adapters
+            self.adapter_idx = {e: i for i, e in enumerate(self.used_adapter)}
+            delta_modules = {
+                'skip': Skip, 
+                'seq': SAdapter, 
+                'para': PAdapter, 
+                'lora': LoRAAdapter, 
+                'lnfit': LNFitAdapter,
+                'bitfit': BitFitAdapter
+            }
+            self.delta_modules = [
                 delta_modules[adapter_name](
                     self, 
                     re_init=self.adapter_config.adapter.switch.algo.re_init
                 ) 
                 for adapter_name in self.used_adapter
             ]
-            self.virtual_modules = np.array(self.virtual_modules)
-            self.virtual_list = nn.ModuleList(self.virtual_modules)
+            self.skip_connection = Skip(self) if self.adapter_config.adapter.switch.algo.name == 's3delta' else None
+            
+            self.delta_modules = np.array(self.delta_modules)
+            self.curr_modules = self.delta_modules
+            self.delta_list = nn.ModuleList(self.delta_modules)
 
-            for virtual_delta in self.virtual_list:
-                for name, value in virtual_delta.named_parameters():
-                    if virtual_delta.name == 'lora' and ('lora' not in name):
+            for delta in self.delta_list:
+                for name, value in delta.named_parameters():
+                    if delta.name == 'lora' and ('lora' not in name):
                         continue
-                    setattr(value, '__is_virtual__', True)
+                    setattr(value, '__is_delta__', True)
+            
+            if not self.adapter_config.adapter.switch.baseline and \
+                self.adapter_config.adapter.switch.stage == 1 and self.adapter_config.adapter.switch.algo.name in ['darts', 'fair_darts', 'gumbel_darts', 's3delta'] \
+                    and (self.adapter_config.adapter.switch.algo.first_order or self.adapter_config.adapter.switch.algo.second_order):
+                print('Create Virtual Adapters')
+                self.virtual_modules = [
+                    delta_modules[adapter_name](
+                        self, 
+                        re_init=self.adapter_config.adapter.switch.algo.re_init
+                    ) 
+                    for adapter_name in self.used_adapter
+                ]
+                self.virtual_modules = np.array(self.virtual_modules)
+                self.virtual_list = nn.ModuleList(self.virtual_modules)
+
+                for virtual_delta in self.virtual_list:
+                    for name, value in virtual_delta.named_parameters():
+                        if virtual_delta.name == 'lora' and ('lora' not in name):
+                            continue
+                        setattr(value, '__is_virtual__', True)
 
     def copy_params(self):
         for i in range(len(self.virtual_modules)):

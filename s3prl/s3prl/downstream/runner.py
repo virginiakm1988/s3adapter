@@ -457,7 +457,7 @@ class Runner():
     def prepare_stage(self, stage: int):
         self.upstream.model.set_stage(stage)
         for entry in self.all_entries:
-            if self.args.adapter != False and entry.name == "Upstream":
+            if self.args.adapter and entry.name == "Upstream":
                 for name, param in entry.model.named_parameters():
                     if getattr(param, '__is_delta__', False):#"adapter" in name or 'lora' in name or 'bitfit' in name or 'lnfit' in name:
                         param.requires_grad = True
@@ -532,7 +532,7 @@ class Runner():
                 entry.model.train()
 
             #### add adapters ##################
-            if self.args.adapter != None and entry.name == "Upstream":
+            if self.args.adapter and entry.name == "Upstream":
                 adapter_param = 0
                 for name, param in entry.model.named_parameters():
                     if getattr(param, '__is_delta__', False):
@@ -543,10 +543,10 @@ class Runner():
                     elif getattr(param, '__is_virtual__', False):
                         trainable_v_paras.append(param)
                         linelogger.info(f'add {name} into trainable_v_paras')
-                        param.requires_grad = True
+                        param.requires_grad = (self.stage == 1)
                     elif getattr(param, '__is_switch__', False):
                         trainable_a_paras.append(param)
-                        param.requires_grad = True
+                        param.requires_grad = (self.stage == 1)
                     else:
                         param.requires_grad = False
                 trainable_paras += list(additional_weight)
@@ -568,7 +568,7 @@ class Runner():
 
         # optimizer
         w_optimizer = self._get_optimizer(trainable_w_paras, 'w_optimizer', [])
-        a_optimizer = self._get_optimizer(trainable_a_paras, 'a_optimizer', [])
+        a_optimizer = self._get_optimizer(trainable_a_paras, 'a_optimizer', []) if len(trainable_a_paras) else None
         v_optimizer = self._get_optimizer(trainable_v_paras, 'v_optimizer', []) if len(trainable_v_paras) else None
 
         if v_optimizer:
@@ -777,7 +777,7 @@ class Runner():
                     all_states = {
                         'Optimizer': {
                             "w_optimizer": w_optimizer.state_dict(), 
-                            "a_optimizer": a_optimizer.state_dict(),
+                            "a_optimizer": a_optimizer.state_dict() if a_optimizer else None,
                             "v_optimizer": v_optimizer.state_dict() if v_optimizer else None
                         },
                         'Step': global_step,

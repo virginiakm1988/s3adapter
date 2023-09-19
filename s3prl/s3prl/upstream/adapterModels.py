@@ -1042,6 +1042,7 @@ class LoRAAdapter(nn.Module):
         return self.num_param / 1e6
 
     def re_init(self):
+        raise NotImplementedError
         ref = {key: getattr(self, key, None) for key in self.lora_keys}
         for key in self.lora_keys:
             nn.init.normal_(ref[key].lora_A, mean=0.0, std=sqrt(1/sqrt(ref[key].lora_A.shape[1])))

@@ -22,7 +22,7 @@ def load_and_convert_fairseq_ckpt(fairseq_source: str, output_path: str = None):
         torch.save(output_state, output_path)
 
 
-def load_converted_model(ckpt: str):
+def load_converted_model(ckpt: str, **kwargs):
     ckpt_state = torch.load(ckpt, map_location="cpu")
 
     for required_key in ["task_cfg", "model_cfg", "model_weight"]:
@@ -33,7 +33,7 @@ def load_converted_model(ckpt: str):
 
     task_cfg = merge_with_parent(AudioPretrainingConfig, ckpt_state["task_cfg"])
     model_cfg = merge_with_parent(Wav2Vec2Config, ckpt_state["model_cfg"])
-    model = Wav2Vec2Model(model_cfg)
+    model = Wav2Vec2Model(model_cfg, **kwargs)
     model.load_state_dict(ckpt_state["model_weight"], strict=False)
     return model, task_cfg
 

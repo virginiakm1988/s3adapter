@@ -10,6 +10,7 @@ import math
 import uuid
 import logging
 import loralib as lora
+import functools
 from enum import Enum, EnumMeta
 from dataclasses import dataclass, field
 from copy import deepcopy
@@ -2313,7 +2314,7 @@ class Wav2Vec2Config:
 
 
 class Wav2Vec2Model(nn.Module):
-    def __init__(self, cfg: Wav2Vec2Config):
+    def __init__(self, cfg: Wav2Vec2Config, **kwargs):
         super().__init__()
         self.cfg = cfg
 
@@ -2410,7 +2411,7 @@ class Wav2Vec2Model(nn.Module):
         if cfg.layer_type == "conformer" and cfg.pos_enc_type in ["rel_pos", "rope"]:
             encoder_cls = ConformerEncoder
 
-        self.encoder = encoder_cls(cfg)
+        self.encoder = encoder_cls(cfg, **kwargs)
         self.layer_norm = LayerNorm(self.embed)
 
         self.target_glu = None
@@ -2821,6 +2822,20 @@ class Wav2Vec2Model(nn.Module):
     def reduce_tau(self):
         for layer in self.encoder.layers:
             layer.adapterswitch.reduce_tau()
+
+    def all_alpha(self):
+        alphas = []
+        for layer in self.encoder.layers:
+            alphas.extend(layer.adapterswitch.parameters())
+        return alphas
+    
+    @functools.cached_property
+    def param_nums(self):
+        all_param_nums = []
+        for layer in self.encoder.layers:
+            for delta_module in layer.delta_modules:
+                all_param_nums.append(delta_module.num_parameter)
+        return all_param_nums
 
     def aux_loss(self):
         loss = 0

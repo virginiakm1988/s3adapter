@@ -146,7 +146,7 @@ class DownstreamExpert(nn.Module):
         if split == 'train':
             switch_ratio = self.adapterConfig.adapter.switch.ratio
             train_dataset, switch_dataset = torch.utils.data.random_split(self.train_dataset, [1 - switch_ratio, switch_ratio])
-            return {"train": self._get_train_dataloader(train_dataset), "switch": self._get_train_dataloader(switch_dataset)}
+            return {"train": self._get_train_dataloader(train_dataset), "switch": self._get_train_dataloader(switch_dataset) if len(switch_dataset) else None}
         else:
             return self._get_eval_dataloader(getattr(self, f'{split}_dataset'))
 

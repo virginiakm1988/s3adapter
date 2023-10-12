@@ -202,7 +202,7 @@ class DownstreamExpert(nn.Module):
             results.update({f'{mode}-aux_loss': average_aux_loss})
             #print(f'aux_loss {average_aux_loss}')
 
-            total_loss = results['loss'] + average_aux_loss
+            total_loss = results[f'{mode}-loss'] + average_aux_loss
             logger.add_scalar(
                 f'voxceleb1/{mode}-total_loss', total_loss, global_step=global_step
             )

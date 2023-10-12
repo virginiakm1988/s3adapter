@@ -186,7 +186,7 @@ class DownstreamExpert(nn.Module):
 
         for key in ["loss", "acc"]:
             values = records[key]
-            average = sum(values) / len(values)
+            average = sum(values) / len(values) if len(values) else 0
             logger.add_scalar(
                 f'speech_commands/{mode}-{key}',
                 average,
@@ -210,7 +210,7 @@ class DownstreamExpert(nn.Module):
             results.update({f'{mode}-aux_loss': average_aux_loss})
             #print(f'aux_loss {average_aux_loss}')
 
-            total_loss = results['loss'] + average_aux_loss
+            total_loss = results[f'{mode}-ks-loss'] + average_aux_loss
             logger.add_scalar(
                 f'speech_commands/{mode}-total_loss', total_loss, global_step=global_step
             )

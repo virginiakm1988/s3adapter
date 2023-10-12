@@ -3082,6 +3082,8 @@ class TransformerEncoder(nn.Module):
             )
         x = F.dropout(x, p=self.dropout, training=self.training)
 
+        ###! hidden_states_0 = x !###
+
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 

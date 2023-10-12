@@ -110,6 +110,7 @@ class Runner():
         self.config = config
 
         self.init_ckpt = torch.load(self.args.init_ckpt, map_location='cpu') if self.args.init_ckpt else {}
+        self.exchange_adapter = torch.load(self.args.exchange_adapter, map_location='cpu') if self.args.exchange_adapter else {}
 
         '''
         if isinstance(args.upstream_adapter_config, str):   # In evaluate mode (i.e. run with -e evaluate), this parameter will be dict.
@@ -211,6 +212,15 @@ class Runner():
                     show(f'[Runner] - Loading {"Adapter"} weights & switch logits from the previous experiment')
                     model_dict = model.state_dict()
                     model_dict.update(adapter_weight)
+                    model.load_state_dict(model_dict)
+            
+            if self.args.exchange_adapter:
+                # override adapter weight
+                exchange_adapter = self.exchange_adapter.get('adapter')
+                if exchange_adapter:
+                    show(f'[Runner] - Loading {"Adapter"} weights & switch logits from the previous experiment')
+                    model_dict = model.state_dict()
+                    model_dict.update(exchange_adapter)
                     model.load_state_dict(model_dict)
         
         if self.args.random_exp:
@@ -1240,6 +1250,7 @@ class Runner():
         evaluate_ratio = float(self.config["runner"].get("evaluate_ratio", 1))
         evaluate_steps = round(len(dataloader) * evaluate_ratio)
 
+        inputs, outputs, labels = [], [], []
         batch_ids = []
         records = defaultdict(list)
         for batch_id, (wavs, *others) in enumerate(tqdm(dataloader, dynamic_ncols=True, desc=split, total=evaluate_steps)):
@@ -1249,6 +1260,8 @@ class Runner():
             wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
             with torch.no_grad():
                 features = self.upstream.model(wavs)
+                upstream_out = deepcopy(features)
+                others_out = deepcopy(others)
                 features = self.featurizer.model(wavs, features)
                 self.downstream.model(
                     split,
@@ -1257,7 +1270,31 @@ class Runner():
                     batch_id = batch_id,
                 )
                 batch_ids.append(batch_id)
-                del wavs, features
+
+                before, after = upstream_out['hidden_state_0'], upstream_out['hidden_state_12']
+                before = [b.cpu().numpy() for b in torch.mean(before, dim=1)]
+                after = [a.cpu().numpy() for a in torch.mean(after, dim=1)]
+
+                label = [l for l in others_out[0]]
+
+                inputs += before
+                outputs += after
+                labels += label
+
+        inputs = np.stack(inputs, axis=0)
+        outputs = np.stack(outputs, axis=0)
+
+        inputs = torch.tensor(inputs)
+        outputs = torch.tensor(outputs)
+        labels = torch.tensor(labels)
+
+        dir_name = f'visualize/{self.args.downstream}/{self.adapter_config.adapter.type[0]}' + ('' if self.args.downstream != 'emotion' else f'/{self.config["downstream_expert"]["datarc"]["test_fold"]}')
+        if not os.path.exists(dir_name):
+            os.makedirs(dir_name)
+        torch.save(inputs, f'{dir_name}/inputs.pt')
+        torch.save(outputs, f'{dir_name}/outputs.pt')
+        torch.save(labels, f'{dir_name}/labels.pt')
+            
         # logging
         save_names = self.downstream.model.log_records(
             split,

@@ -27,7 +27,7 @@ def get_downstream_args():
     parser = argparse.ArgumentParser()
 
     # train or test for this experiment
-    parser.add_argument('-m', '--mode', choices=['train', 'train_stage1', 'train_stage2', 'synflow', 'gen_weight', 'evaluate', 'inference', 'naswot'], required=True)
+    parser.add_argument('-m', '--mode', choices=['train', 'train_stage1', 'train_stage2', 'synflow', 'gen_weight', 'evaluate', 'inference', 'naswot', 'reduce_dim'], required=True)
     parser.add_argument('-t', '--evaluate_split', default='test')
     parser.add_argument('-o', '--override', help='Used to override args and config, this is at the highest priority')
 
@@ -121,6 +121,7 @@ def get_downstream_args():
     parser.add_argument('--downstream_pretrain_path', type=str, default="None")
     parser.add_argument('--get_init', type=str2bool, default=False)
 
+    parser.add_argument('--exchange_adapter', type=str, default='', help='path of adapter to exchange')
     ######end of prompt & adapter modification#################################################################
 
     args = parser.parse_args()

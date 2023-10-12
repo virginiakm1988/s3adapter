@@ -88,6 +88,8 @@ class DownstreamExpert(nn.Module):
 
 
     def _get_train_dataloader(self, dataset):
+        if len(dataset) == 0:
+            return None
         sampler = DistributedSampler(dataset) if is_initialized() else None
         return DataLoader(
             dataset, batch_size=self.datarc['train_batch_size'],
@@ -204,7 +206,7 @@ class DownstreamExpert(nn.Module):
             )
             results.update({f'{mode}-aux_loss': average_aux_loss})
 
-            total_loss = results['loss'] + average_aux_loss
+            total_loss = results[f'{mode}-loss'] + average_aux_loss
             logger.add_scalar(
                 f'emotion-{self.fold}/{mode}-total_loss', total_loss, global_step=global_step
             )

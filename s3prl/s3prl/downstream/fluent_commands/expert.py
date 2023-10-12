@@ -225,6 +225,7 @@ class DownstreamExpert(nn.Module):
                 average,
                 global_step=global_step
             )
+            results.update({key: average})
             with open(Path(self.expdir) / "log.log", 'a') as f:
                 if key == 'acc':
                     print(f"{mode} {key}: {average}")
@@ -242,7 +243,7 @@ class DownstreamExpert(nn.Module):
             results.update({f'{mode}-aux_loss': average_aux_loss})
             #print(f'aux_loss {average_aux_loss}')
 
-            total_loss = results['intent_loss'] + average_aux_loss
+            total_loss = torch.FloatTensor(records['intent_loss']).mean().item() + average_aux_loss
             logger.add_scalar(
                 f'fluent_commands/{mode}-total_loss', total_loss, global_step=global_step
             )

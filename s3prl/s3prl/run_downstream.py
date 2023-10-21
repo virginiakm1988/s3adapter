@@ -266,6 +266,7 @@ def main():
 
     if args.ensemble:
         for adapter_ckpt in args.ensemble:
+            args.init_ckpt = adapter_ckpt
             ckpt_dir = os.path.dirname(adapter_ckpt)
             args_cfg_files = glob.glob(f'{ckpt_dir}/args_*.yaml')
             args_cfg_files.sort(key=lambda x: os.path.getmtime(x))

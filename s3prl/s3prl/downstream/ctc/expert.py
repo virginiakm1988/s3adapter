@@ -144,7 +144,8 @@ class DownstreamExpert(nn.Module):
         records["hypothesis"] += hypothesis
         records["groundtruth"] += groundtruth
         records["filename"] += filenames
-
+        if kwargs.get("return_log_probs", False):
+            records["log_probs"] += log_probs.cpu().tolist()
         return loss
 
     # interface
@@ -229,3 +230,29 @@ class DownstreamExpert(nn.Module):
             ref_ark.close()
 
         return save_names
+
+
+    def read_all_and_decode(self, split, ensemble_probs):
+        with open(os.path.join(self.expdir, f"{split}-ref.ark"), "r") as f:
+            lines = f.readlines()
+            
+        refs = [] 
+        for l in lines:
+            refs.extend((l.split()[1:]))
+                 
+        pred_tokens = ensemble_probs.argmax(dim=-1)
+        filtered_tokens = []
+        for pred_token in pred_tokens:
+            pred_token = pred_token.unique_consecutive()
+            filtered_token = [
+                token
+                for token in pred_token.tolist()
+                if token != self.tokenizer.pad_idx and token != self.tokenizer.eos_idx
+            ]
+            filtered_tokens.append(filtered_token)
+        hypothesis = [
+            self.tokenizer.decode(h) for h in filtered_tokens
+        ]
+        
+        for metric in self.metrics:
+            print(eval(metric)(hypothesis, refs))

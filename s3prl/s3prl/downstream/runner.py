@@ -1251,6 +1251,7 @@ class Runner():
         evaluate_steps = round(len(dataloader) * evaluate_ratio)
 
         inputs, outputs, labels = [], [], []
+        all_hiddens = defaultdict(list)
         batch_ids = []
         records = defaultdict(list)
         for batch_id, (wavs, *others) in enumerate(tqdm(dataloader, dynamic_ncols=True, desc=split, total=evaluate_steps)):
@@ -1273,6 +1274,10 @@ class Runner():
 
                 before, after = upstream_out['hidden_state_0'], upstream_out['hidden_state_12']
                 before = [b.cpu().numpy() for b in torch.mean(before, dim=1)]
+                for n, hs in upstream_out.items():
+                     if 'hidden_state_' in n:
+                        all_hiddens[n] += [h for h in torch.mean(hs, dim=1).cpu().numpy()]
+                
                 after = [a.cpu().numpy() for a in torch.mean(after, dim=1)]
 
                 label = [l for l in others_out[0]]
@@ -1282,10 +1287,15 @@ class Runner():
                 labels += label
 
         inputs = np.stack(inputs, axis=0)
+        for n in all_hiddens.keys():
+            all_hiddens[n] = np.stack(all_hiddens[n], axis=0)
         outputs = np.stack(outputs, axis=0)
 
         inputs = torch.tensor(inputs)
         outputs = torch.tensor(outputs)
+        for n in all_hiddens.keys():
+            all_hiddens[n] = torch.tensor(all_hiddens[n])
+        # all_hiddens = torch.tensor(all_hiddens)
         labels = torch.tensor(labels)
 
         dir_name = f'visualize/{self.args.downstream}/{self.adapter_config.adapter.type[0]}' + ('' if self.args.downstream != 'emotion' else f'/{self.config["downstream_expert"]["datarc"]["test_fold"]}')
@@ -1293,8 +1303,12 @@ class Runner():
             os.makedirs(dir_name)
         torch.save(inputs, f'{dir_name}/inputs.pt')
         torch.save(outputs, f'{dir_name}/outputs.pt')
+        torch.save(all_hiddens, f'{dir_name}/all_hiddens.pt')
         torch.save(labels, f'{dir_name}/labels.pt')
-            
+        if self.args.ensemble:
+            self.ensemble_dir = os.path.join('probs', self.adapter_config.adapter.type[0])
+            os.makedirs(self.ensemble_dir, exist_ok=True)
+            torch.save(records["log_probs"], os.path.join(self.ensemble_dir, 'log_prob.pt'))
         # logging
         save_names = self.downstream.model.log_records(
             split,
@@ -1412,3 +1426,75 @@ class Runner():
         print("[Runner] - Pushing model files to the Hub ...")
         model_repo.push_to_hub()
         print("[Runner] - Training run complete!")
+
+
+
+    def ensemble(self, split=None, logger=None, global_step=0, log_prob_dirs=[]):
+        """evaluate function will always be called on a single process even during distributed training"""
+
+        # When this member function is called directly by command line
+        not_during_training = split is None and logger is None and global_step == 0
+        if not_during_training:
+            split = self.args.evaluate_split
+            tempdir = tempfile.mkdtemp()
+            logger = SummaryWriter(tempdir)
+
+        if self.adapter_config.adapter.switch.algo.name == 's3delta':
+            self.upstream.model.set_hard_forward_structure(max_num_param=self.adapter_config.adapter.switch.algo.para_budget, baseline=self.adapter_config.adapter.switch.baseline)
+
+        # fix seed to guarantee the same evaluation protocol across steps 
+        random.seed(self.args.seed)
+        np.random.seed(self.args.seed)
+        torch.manual_seed(self.args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.args.seed)
+            with torch.cuda.device(self.args.device):
+                torch.cuda.empty_cache()
+
+        # record original train/eval states and set all models to eval
+        trainings = []
+        for entry in self.all_entries:
+            trainings.append(entry.model.training)
+            entry.model.eval()
+
+        # prepare data
+        dataloader = self.downstream.model.get_dataloader(split)
+        evaluate_ratio = float(self.config["runner"].get("evaluate_ratio", 1))
+        evaluate_steps = round(len(dataloader) * evaluate_ratio)
+
+        inputs, outputs, labels = [], [], []
+        all_hiddens = defaultdict(list)
+        batch_ids = []
+        records = defaultdict(list)
+        
+        ens_probs = []
+        for ens_dir in log_prob_dirs:
+            prob_ckpt = torch.load(os.path.join(ens_dir, 'log_prob.pt'))
+            ens_probs.append(prob_ckpt)
+        ens_probs = torch.FloatTensor(ens_probs).to(self.args.device).mean(dim=0)
+        save_names = self.downstream.model.log_records(
+            split,
+            records = records,
+            logger = logger,
+            global_step = global_step,
+            batch_ids = batch_ids,
+            total_batch_num = len(dataloader),
+            to_wandb = (self.args.mode != 'evaluate')
+        )
+        batch_ids = []
+        records = defaultdict(list)
+
+        # prepare back to training
+        if torch.cuda.is_available():
+            with torch.cuda.device(self.args.device):
+                torch.cuda.empty_cache()
+
+        for entry, training in zip(self.all_entries, trainings):
+            if training:
+                entry.model.train()
+
+        if not_during_training:
+            logger.close()
+            shutil.rmtree(tempdir)
+        linelogger.info(save_names)
+        return [] if type(save_names) is not list else save_names

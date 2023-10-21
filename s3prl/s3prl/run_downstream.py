@@ -92,7 +92,8 @@ def get_downstream_args():
     parser.add_argument('--upstream_feature_normalize', action='store_true', help='Specify whether to normalize hidden features before weighted sum')
     parser.add_argument('--upstream_model_name', default="model.pt", help='The name of the model file in the HuggingFace Hub repo.')
     parser.add_argument('--upstream_revision', help="The commit hash of the specified HuggingFace Repository")
-
+    parser.add_argument('--ensemble', nargs='+', default=[], help="Ensemble upstreams")
+    
     # experiment directory, choose one to specify
     # expname uses the default root directory: result/downstream
     parser.add_argument('-n', '--expname', help='Save experiment at result/downstream/expname')
@@ -263,10 +264,22 @@ def main():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    runner = Runner(args, config)
+    if args.ensemble:
+        for adapter_ckpt in args.ensemble:
+            ckpt_dir = os.path.dirname(adapter_ckpt)
+            args_cfg_files = glob.glob(f'{ckpt_dir}/args_*.yaml')
+            args_cfg_files.sort(key=lambda x: os.path.getmtime(x))
+            with open(args_cfg_files[-1], 'r') as file:
+                args_cfg = yaml.load(file, Loader=yaml.FullLoader)
+                override(args_cfg['override'], args, config)
+            runner = Runner(args, config)
     # print('234', runner.config)
     
-    eval(f'runner.{args.mode}')()
+            eval(f'runner.{args.mode}')()
+        args.ensemble_dirs.append(runner.ensemble_dir)
+    # runner = Runner(args, config)
+    # print('234', runner.config)
+    # eval(f'runner.{args.mode if not args.ensemble else "ensemble"}')()
 
 
 if __name__ == '__main__':

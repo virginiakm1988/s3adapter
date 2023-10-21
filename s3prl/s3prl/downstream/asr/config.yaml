@@ -12,7 +12,7 @@ runner:
 optimizer:
   name: TorchOptim
   torch_optim_name: Adam
-  lr: 1.0e-4
+  lr: 5.0e-5
 
 # comment the whole scheduler config block
 # to disable learning rate scheduling
@@ -47,8 +47,8 @@ downstream_expert:
     train_batch_size: 16
     batch_size: 16
     eval_batch_size: 1
-    libri_root: '/work/u2752721/LibriSpeech'
-    bucket_file: './downstream/asr/data/len_for_bucket'
+    libri_root: '/home/koredata/hao/LibriSpeech'
+    bucket_file: './downstream/asr/data/librispeech/len_for_bucket'
     dict_path: "./downstream/asr/char.dict"
 
     zero_infinity: True

@@ -240,7 +240,7 @@ def main():
         print(f"Logged into Hugging Face Hub with user: {hf_user}")
     
     # Save command
-    if is_leader_process():
+    if is_leader_process() and not args.ensemble:
         with open(os.path.join(args.expdir, f'args_{get_time_tag()}.yaml'), 'w') as file:
             yaml.dump(vars(args), file)
 
@@ -265,22 +265,30 @@ def main():
         torch.backends.cudnn.benchmark = False
 
     if args.ensemble:
-        for adapter_ckpt in args.ensemble:
-            args.init_ckpt = adapter_ckpt
-            ckpt_dir = os.path.dirname(adapter_ckpt)
-            args_cfg_files = glob.glob(f'{ckpt_dir}/args_*.yaml')
-            args_cfg_files.sort(key=lambda x: os.path.getmtime(x))
-            with open(args_cfg_files[-1], 'r') as file:
-                args_cfg = yaml.load(file, Loader=yaml.FullLoader)
-                override(args_cfg['override'], args, config)
-            runner = Runner(args, config)
-    # print('234', runner.config)
-    
-            eval(f'runner.{args.mode}')()
-        args.ensemble_dirs.append(runner.ensemble_dir)
-    # runner = Runner(args, config)
+        from s3prl.downstream.ensemble_runner import EnsembleRunner
+        runner = EnsembleRunner(args, config)
+    #     args.ensemble_dirs = []
+    #     for adapter_ckpt in args.ensemble:
+    #         args.init_ckpt = adapter_ckpt
+    #         ckpt_dir = os.path.dirname(adapter_ckpt)
+    #         args_cfg_files = glob.glob(f'{ckpt_dir}/args_*.yaml')
+    #         args_cfg_files.sort(key=lambda x: os.path.getmtime(x))
+    #         with open(args_cfg_files[-1], 'r') as file:
+    #             args_cfg = yaml.load(file, Loader=yaml.FullLoader)
+    #             override(args_cfg['override'], args, config)
+    #         runner = Runner(args, config)
+    #         # HACK
+    #         runner.ensemble_dir = os.path.join('probs', runner.adapter_config.adapter.type[0])
+    # # print('234', runner.config)
+    #         # ADD
+    #         # eval(f'runner.{args.mode}')()
+    #         args.ensemble_dirs.append(runner.ensemble_dir)
+    else:
+        runner = Runner(args, config)
+    # print(f"HANKSAVEME:\n{args}")
     # print('234', runner.config)
     # eval(f'runner.{args.mode if not args.ensemble else "ensemble"}')()
+    eval(f'runner.{args.mode}')()
 
 
 if __name__ == '__main__':

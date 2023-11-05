@@ -113,10 +113,17 @@ class DownstreamExpert(nn.Module):
             padding_value=self.tokenizer.pad_idx,
         ).to(device=device)
 
-        features = self.curr_projector(features)
-        logits, log_probs_len = self.curr_model(features, features_len)
-        log_probs = nn.functional.log_softmax(logits, dim=-1)
-
+        if 'log_probs' not in kwargs:
+            features = self.curr_projector(features)
+            logits, log_probs_len = self.curr_model(features, features_len)
+            log_probs = nn.functional.log_softmax(logits, dim=-1)
+        else:
+            log_probs = kwargs['log_probs']
+            log_probs_len = features_len
+        
+        if kwargs.get("return_log_probs", False):
+            return log_probs
+        
         loss = self.objective(
             log_probs.transpose(0, 1),  # (N, T, C) -> (T, N, C)
             labels,
@@ -144,8 +151,8 @@ class DownstreamExpert(nn.Module):
         records["hypothesis"] += hypothesis
         records["groundtruth"] += groundtruth
         records["filename"] += filenames
-        if kwargs.get("return_log_probs", False):
-            records["log_probs"] += log_probs.cpu().tolist()
+        # if kwargs.get("return_log_probs", False):
+        #     records["log_probs"] += log_probs.cpu().tolist()
         return loss
 
     # interface
@@ -237,10 +244,20 @@ class DownstreamExpert(nn.Module):
             lines = f.readlines()
             
         refs = [] 
+        pred_tokens = []
         for l in lines:
-            refs.extend((l.split()[1:]))
-                 
-        pred_tokens = ensemble_probs.argmax(dim=-1)
+            refs.append((l[l.find(' ') + 1: ]))
+        
+        for p in zip(*ensemble_probs):
+            stacked_probs = torch.FloatTensor(p)
+            votes = torch.zeros(stacked_probs.shape)
+            # Compute the majority vote along the last dimension (axis 2)
+            majority_vote = torch.argmax(stacked_probs, dim=-1)
+            votes.scatter_add_(-1, majority_vote.unsqueeze(-1), torch.ones(stacked_probs.shape[:-1]).unsqueeze(-1))
+            # If you want the winning class index for each example (along axis 1)
+            winning_class = torch.argmax(votes, dim=-1)
+            pred_tokens.append(winning_class)
+        # pred_tokens = ensemble_probs.argmax(dim=-1)
         filtered_tokens = []
         for pred_token in pred_tokens:
             pred_token = pred_token.unique_consecutive()
@@ -253,6 +270,7 @@ class DownstreamExpert(nn.Module):
         hypothesis = [
             self.tokenizer.decode(h) for h in filtered_tokens
         ]
-        
+        print(f"hyp: {len(hypothesis)}, ref: {len(refs)}") 
+        print(f"hyp: {hypothesis[:3]}, ref: {refs[:3]}")
         for metric in self.metrics:
-            print(eval(metric)(hypothesis, refs))
+            print(f"{metric}: {eval(metric)(hypothesis, refs):.8f}")

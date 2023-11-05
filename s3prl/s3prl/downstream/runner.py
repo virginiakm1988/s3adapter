@@ -1269,6 +1269,7 @@ class Runner():
                     features, *others,
                     records = records,
                     batch_id = batch_id,
+                    return_log_probs=(self.args.ensemble != [])
                 )
                 batch_ids.append(batch_id)
 
@@ -1296,7 +1297,11 @@ class Runner():
         for n in all_hiddens.keys():
             all_hiddens[n] = torch.tensor(all_hiddens[n])
         # all_hiddens = torch.tensor(all_hiddens)
-        labels = torch.tensor(labels)
+        # labels = torch.tensor(labels)
+        if self.args.ensemble:
+            self.ensemble_dir = os.path.join('probs', self.adapter_config.adapter.type[0])
+            os.makedirs(self.ensemble_dir, exist_ok=True)
+            torch.save(records["log_probs"], os.path.join(self.ensemble_dir, 'log_prob.pt'))
 
         dir_name = f'visualize/{self.args.downstream}/{self.adapter_config.adapter.type[0]}' + ('' if self.args.downstream != 'emotion' else f'/{self.config["downstream_expert"]["datarc"]["test_fold"]}')
         if not os.path.exists(dir_name):
@@ -1305,10 +1310,6 @@ class Runner():
         torch.save(outputs, f'{dir_name}/outputs.pt')
         torch.save(all_hiddens, f'{dir_name}/all_hiddens.pt')
         torch.save(labels, f'{dir_name}/labels.pt')
-        if self.args.ensemble:
-            self.ensemble_dir = os.path.join('probs', self.adapter_config.adapter.type[0])
-            os.makedirs(self.ensemble_dir, exist_ok=True)
-            torch.save(records["log_probs"], os.path.join(self.ensemble_dir, 'log_prob.pt'))
         # logging
         save_names = self.downstream.model.log_records(
             split,
@@ -1468,10 +1469,17 @@ class Runner():
         records = defaultdict(list)
         
         ens_probs = []
-        for ens_dir in log_prob_dirs:
+        for ens_dir in self.args.ensemble_dirs:
             prob_ckpt = torch.load(os.path.join(ens_dir, 'log_prob.pt'))
             ens_probs.append(prob_ckpt)
-        ens_probs = torch.FloatTensor(ens_probs).to(self.args.device).mean(dim=0)
+        zipped_probs = []
+        '''
+        for probs in zip(*ens_probs):
+            zipped_probs.append(torch.FloatTensor(list(probs)).mean(dim=0))
+        '''
+        # ens_probs = torch.FloatTensor(ens_probs).to(self.args.device).mean(dim=0)
+        self.downstream.model.read_all_and_decode(split, ens_probs)
+        '''
         save_names = self.downstream.model.log_records(
             split,
             records = records,
@@ -1481,6 +1489,7 @@ class Runner():
             total_batch_num = len(dataloader),
             to_wandb = (self.args.mode != 'evaluate')
         )
+        '''
         batch_ids = []
         records = defaultdict(list)
 
@@ -1498,3 +1507,4 @@ class Runner():
             shutil.rmtree(tempdir)
         linelogger.info(save_names)
         return [] if type(save_names) is not list else save_names
+        

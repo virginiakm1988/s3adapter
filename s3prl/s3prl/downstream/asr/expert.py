@@ -292,7 +292,15 @@ class DownstreamExpert(nn.Module):
                 the loss to be optimized, should not be detached
                 a single scalar in torch.FloatTensor
         """
-        log_probs, log_probs_len = self._get_log_probs(features)
+        if 'log_probs' not in kwargs:
+            log_probs, log_probs_len = self._get_log_probs(features)
+        else:
+            log_probs = kwargs['log_probs']
+            log_probs_len = torch.IntTensor([len(feat) for feat in features])
+        
+        if kwargs.get("return_log_probs", False):
+            return log_probs
+        # log_probs, log_probs_len = self._get_log_probs(features)
         device = features[0].device
         labels = [torch.IntTensor(l) for l in labels]
         labels_len = torch.IntTensor([len(label) for label in labels]).to(device=device)
@@ -388,7 +396,7 @@ class DownstreamExpert(nn.Module):
 
             total_loss = loss + average_aux_loss
             logger.add_scalar(
-                f'asr//{key_prefix}-total_loss', total_loss, global_step=global_step
+                f'asr/{key_prefix}-total_loss', total_loss, global_step=global_step
             )
             results.update({f'{key_prefix}-total_loss': total_loss})
 

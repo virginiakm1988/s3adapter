@@ -830,7 +830,7 @@ class Gumbel:
         return y
     
 class PAdapter(nn.Module):
-    def __init__(self, parentModule: nn.Module, re_init=False) -> None:
+    def __init__(self, parentModule: nn.Module, re_init=False, config=None) -> None:
         super().__init__()
         
         for name, module in parentModule.named_children():
@@ -839,9 +839,9 @@ class PAdapter(nn.Module):
             
         emb_dim = parentModule.embedding_dim
         self.adapter = nn.Sequential(
-                    nn.Linear(emb_dim, 32),
+                    nn.Linear(emb_dim, config.bottleneck_dim),
                     nn.GELU(),
-                    nn.Linear(32, emb_dim),
+                    nn.Linear(config.bottleneck_dim, emb_dim),
                 )
         self.name = 'para'
         self.attn = self.layer_result = None
@@ -918,7 +918,7 @@ class PAdapter(nn.Module):
         return x, (self.attn, self.layer_result)
 
 class SAdapter(nn.Module):
-    def __init__(self, parentModule: nn.Module, re_init=False) -> None:
+    def __init__(self, parentModule: nn.Module, re_init=False, config=None) -> None:
         super().__init__()
         
         for name, module in parentModule.named_children():
@@ -927,9 +927,9 @@ class SAdapter(nn.Module):
             
         emb_dim = parentModule.embedding_dim
         self.adapter = nn.Sequential(
-                    nn.Linear(emb_dim, 32),
+                    nn.Linear(emb_dim, config.bottleneck_dim),
                     nn.GELU(),
-                    nn.Linear(32, emb_dim),
+                    nn.Linear(config.bottleneck_dim, emb_dim),
                 )
         
         self.name = 'seq'
@@ -1010,7 +1010,7 @@ class SAdapter(nn.Module):
 
 class LoRAAdapter(nn.Module):
     # Use LoRA for q_proj and v_proj in MultiHeadAttention
-    def __init__(self, parentModule: nn.Module, re_init=False):
+    def __init__(self, parentModule: nn.Module, re_init=False, config=None):
         super().__init__()
         for name, module in parentModule.named_children():
             # self.add_module(name, module)
@@ -1024,7 +1024,7 @@ class LoRAAdapter(nn.Module):
                     if getattr(self, lastKey, False):
                         continue
                     outdim, indim  = child.weight.shape
-                    setattr(self, lastKey, quant_noise(lora.Linear(indim, outdim, r=8), parentModule.self_attn.q_noise, parentModule.self_attn.qn_block_size))
+                    setattr(self, lastKey, quant_noise(lora.Linear(indim, outdim, r=config.rank), parentModule.self_attn.q_noise, parentModule.self_attn.qn_block_size))
                     ref = getattr(self, lastKey, None)
                     ref.weight = child.weight
                     ref.bias = child.bias
@@ -1241,7 +1241,7 @@ def find_module(root_module: nn.Module, key:str):
 
 
 class BitFitAdapter(nn.Module):
-    def __init__(self, parentModule: nn.Module, re_init=False):
+    def __init__(self, parentModule: nn.Module, re_init=False, config=None):
         super().__init__()
         for name, module in parentModule.named_children():
             pass

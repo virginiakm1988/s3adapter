@@ -29,3 +29,15 @@ adapter:
 
   houlsby:
     input: false
+  
+  seq:
+    bottleneck_dim: 32
+
+  para:
+    bottleneck_dim: 32
+  
+  lora:
+    rank: 8
+
+  bitfit:
+    

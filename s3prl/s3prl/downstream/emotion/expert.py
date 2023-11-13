@@ -133,7 +133,7 @@ class DownstreamExpert(nn.Module):
         if mode == 'train':
             switch_ratio = self.adapterConfig.adapter.switch.ratio
             train_dataset, switch_dataset = torch.utils.data.random_split(self.train_dataset, [1 - switch_ratio, switch_ratio])
-            return {"train": self._get_train_dataloader(train_dataset), "switch": self._get_train_dataloader(switch_dataset)}
+            return {"train": self._get_train_dataloader(train_dataset), "switch": None if len(switch_dataset) == 0 else self._get_train_dataloader(switch_dataset)}
         return eval(f'self.get_{mode}_dataloader')()
 
     # Interface
@@ -204,7 +204,7 @@ class DownstreamExpert(nn.Module):
             )
             results.update({f'{mode}-aux_loss': average_aux_loss})
 
-            total_loss = results['loss'] + average_aux_loss
+            total_loss = results[f'{mode}-loss'] + average_aux_loss
             logger.add_scalar(
                 f'emotion-{self.fold}/{mode}-total_loss', total_loss, global_step=global_step
             )

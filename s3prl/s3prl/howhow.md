@@ -82,3 +82,9 @@ If you want to tune featurizer with switch logits, specify `--f_lr` & `--f_lr_st
 ```bash
 python3 run_downstream.py -m evaluate -t {testing split} -i {ckpt} -c downstream/ctc/libriphone.yaml --adapter=houlsby -u hubert -d ctc -uac upstream/adapterConfig.yaml -n {exp name}
 ```
+
+#### Ensemble
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python3 run_downstream.py -m evaluate -t test -u wav2vec2 -d ctc -f -n test -o "config.adapter_config.type=['seq', 'para', 'lora']" --ensemble result/downstream/wav2vec2_pr_seq_bak/dev-best.ckpt result/downstream/wav2vec2_pr_para_bak/dev-best.ckpt result/downstream/wav2vec2_pr_para_bak/dev-best.ckpt --adapter=houlsby -c downstream/ctc/libriphone.yaml
+```

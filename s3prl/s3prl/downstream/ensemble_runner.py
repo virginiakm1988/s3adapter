@@ -90,6 +90,18 @@ Upstream Model: {upstream_model}
 
 """
 
+class NpEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NpEncoder, self).default(obj)
+
+
+
 
 class ModelEntry:
     def __init__(self, model, name, trainable, interfaces):
@@ -504,7 +516,8 @@ class EnsembleRunner():
         inputs, outputs, labels = [], [], []
         all_hiddens = defaultdict(list)
         batch_ids = []
-        records = defaultdict(list)
+        # records = defaultdict(list)
+        records = defaultdict(lambda x: defaultdict(list))
         for batch_id, (wavs, *others) in enumerate(tqdm(dataloader, dynamic_ncols=True, desc=split, total=evaluate_steps)):
             if batch_id > evaluate_steps:
                 break
@@ -512,37 +525,51 @@ class EnsembleRunner():
             wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
             all_log_probs = []
             with torch.no_grad():
-                for upstream, featurizer, downstream in zip(self.upstreams, self.featurizers, self.downstreams):
+                for upstream, featurizer, downstream, ens_ckpt in zip(self.upstreams, self.featurizers, self.downstreams, self.args.ensemble):
                     features = upstream.model(wavs)
                     features = featurizer.model(wavs, features)
+                    exp_name = os.path.dirname(ens_ckpt)
                     log_probs = downstream.model(
                         split,
                         features, *others,
-                        records = records,
+                        records = records[exp_name],
                         batch_id = batch_id,
                         return_log_probs = True
                     )
                     all_log_probs.append(log_probs)
-                
+                '''
                 all_log_probs = torch.stack(all_log_probs, dim=0)  # 3 * N * T * C
+                
                 for _idx, _seqs in enumerate(zip(*all_log_probs)):
                     merged_seqs = self.merge_all(_seqs)  # 3 * T * C
                     all_log_probs[:, _idx, :, :] = torch.stack(merged_seqs, dim=0)
+                '''
                 batch_ids.append(batch_id)
-                # avg_log_probs = torch.stack(all_log_probs, dim=0).mean(dim=0)
+                avg_log_probs = torch.stack(all_log_probs, dim=0).mean(dim=0)
                 avg_log_probs = all_log_probs.mean(dim=0)
                 self.real_downstream.model(
                     split,
                     features, *others,
-                    records = records,
+                    records = records["real"],
                     batch_id = batch_id,
                     log_probs = avg_log_probs
                 )
 
         # logging
+        for _exp_dir, _records in records.items(): 
+            hyp_cons = _records["hyp_consecutive"]
+            gts = _records["groundtruth"]
+            logging.info(_exp_dir)
+            with open(os.path.join(_exp_dir, 'hyp_cons.json'), 'w') as f:
+                json_data = json.dumps(hyp_cons, cls=NpEncoder)
+                f.write(json_data)
+            with open(os.path.join(_exp_dir, 'gts.json'), 'w') as f:
+                json_data = json.dumps(gts, cls=NpEncoder)
+                f.write(json_data)
+
         save_names = self.real_downstream.model.log_records(
             split,
-            records = records,
+            records = records["real"],
             logger = logger,
             global_step = global_step,
             batch_ids = batch_ids,

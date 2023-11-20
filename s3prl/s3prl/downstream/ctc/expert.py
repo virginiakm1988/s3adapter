@@ -126,6 +126,18 @@ class DownstreamExpert(nn.Module):
         records["loss"].append(loss.item())
 
         pred_tokens = log_probs.argmax(dim=-1)
+        filtered_consecutive = []
+        for pred_token in pred_tokens:
+            filtered_token = [
+                token
+                for token in pred_token.tolist()
+            ]
+            filtered_consecutive.append(filtered_token)
+        hyp_consecutive = [
+            self.tokenizer.decode(h) for h in filtered_consecutive
+        ]
+        records["hyp_consecutive"] += hyp_consecutive
+            
         filtered_tokens = []
         for pred_token in pred_tokens:
             pred_token = pred_token.unique_consecutive()

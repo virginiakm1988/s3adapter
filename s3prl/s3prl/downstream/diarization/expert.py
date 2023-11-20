@@ -292,9 +292,6 @@ class DownstreamExpert(nn.Module):
         features, labels = self._match_length(features, labels)
         predicted = self.curr_model(features)
 
-        if 'return_predicted' in kwargs and kwargs['return_predicted']:
-            return predicted
-
         # cause logits are in (batch, seq, class) and labels are in (batch, seq)
         # nn.CrossEntropyLoss expect to have (N, class) and (N,) as input
         # here we flatten logits and labels in order to apply nn.CrossEntropyLoss
@@ -341,6 +338,8 @@ class DownstreamExpert(nn.Module):
             outpath = os.path.join(self.score_dir, "predictions", rec_id + ".h5")
             with h5py.File(outpath, "w") as wf:
                 wf.create_dataset("T_hat", data=predict)
+        if 'return_predicted' in kwargs and kwargs['return_predicted']:
+            return loss, predicted
         return loss
 
     # interface

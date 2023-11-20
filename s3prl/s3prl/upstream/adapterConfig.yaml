@@ -15,7 +15,8 @@ adapter:
     baseline: -1
     fix_thres: 0.8
     algo: 
-      name: gdas          # choose from ['gdas', 'darts', 'fair_darts', 's3delta', 'gumbel_darts']
+      name: adamix          # choose from ['gdas', 'darts', 'fair_darts', 's3delta', 'gumbel_darts', 'adamix']
+      num_modules: 4
       soft_train:         # Set to True if you don't want to use one-hot when training weight
       soft_switch:        # Set to True if you don't want to use one-hot when training switch
       use_gumbel:         # Set this to True if using sampling-related algorithm, which includes ['s3delta', 'gdas', 'gumbel_darts']

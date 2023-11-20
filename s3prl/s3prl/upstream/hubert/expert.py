@@ -14,6 +14,7 @@ from pathlib import Path
 # For S3Delta
 from scipy.optimize import fsolve
 import numpy as np
+import random
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -155,6 +156,10 @@ class UpstreamExpert(UpstreamBase):
     def use_default(self):
         for layer in self.model.encoder.layers:
             layer.use_default()
+
+    def sample_adapter(self, diff_from_prev=False):
+        for layer in self.model.encoder.layers:
+            layer.sample_adapter(diff_from_prev=diff_from_prev)
 
     @property
     def get_layers(self):

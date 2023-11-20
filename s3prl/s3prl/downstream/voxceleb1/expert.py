@@ -167,7 +167,8 @@ class DownstreamExpert(nn.Module):
         records['filename'] += filenames
         records['predict_speaker'] += SpeakerClassifiDataset.label2speaker(predicted_classid.cpu().tolist())
         records['truth_speaker'] += SpeakerClassifiDataset.label2speaker(labels.cpu().tolist())
-
+        if kwargs.get('return_predicted', False):
+            return loss, predicted
         return loss
 
     # interface

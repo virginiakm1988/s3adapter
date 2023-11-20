@@ -15,6 +15,7 @@ import json
 
 import torch
 import torchaudio
+import torch.nn.functional as F
 import numpy as np
 import wandb
 from tqdm import tqdm
@@ -319,7 +320,8 @@ class Runner():
                 "use_virtual", 
                 "use_default",
                 "get_layers",
-                "get_named_parameters"
+                "get_named_parameters",
+                "sample_adapter"
             ]
         )
 
@@ -837,12 +839,12 @@ class Runner():
             )
         wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in data['wavs']]
         if self.upstream.trainable:
-            features = self.upstream.model(wavs)
+            upstream_features = self.upstream.model(wavs)
         else:
             with torch.no_grad():
-                features = self.upstream.model(wavs)
+                upstream_features = self.upstream.model(wavs)
 
-        features = self.featurizer.model(wavs, features)
+        features = self.featurizer.model(wavs, upstream_features)
         if specaug:
             features, _ = specaug(features)
         
@@ -1075,13 +1077,21 @@ class Runner():
             if self.adapter_config.adapter.switch.algo.use_gumbel and self.stage < 2:
                     self.upstream.model.sample_gumbel()
             for i in range(gradient_accumulate_steps):
-                loss = self.model_forward(data[i], train_split, records, specaug)
-
+                # if self.adapter_config.adapter.switch.algo.name == 'adamix':
+                self.upstream.model.sample_adapter()
+                loss, logits_main = self.model_forward(data[i], train_split, records, specaug, return_predicted=True)
+                self.upstream.model.sample_adapter(diff_from_prev=True)
+                _, logits_sub = self.model_forward(data[i], train_split, records, specaug, return_predicted=True)
                 batch_id += 1
                 batch_ids.append(batch_id)
+                
+                logits_main = F.softmax(logits_main, dim=-1)
+                logits_sub = F.softmax(logits_sub, dim=-1)
 
-                (loss / gradient_accumulate_steps).backward()
-                del loss
+                kl_loss = 0.5 * (F.kl_div(logits_main, logits_sub) + F.kl_div(logits_sub, logits_main))
+                # exit(0)
+                ((kl_loss + loss) / gradient_accumulate_steps).backward()
+                del loss, kl_loss
 
                 # Update progress bar
                 self.inner_pbar.update(1)

@@ -52,6 +52,8 @@ def setup_algo(adapter_config: dict):
         adapter_config['switch']['tau']['init_value'] = 1
         adapter_config['switch']['algo']['sigmoid_tau'] = 1
         adapter_config['switch']['algo']['para_budget'] = 0.6 # 1.0M
+    elif algo_name == 'adamix':
+        adapter_config['switch']['algo']['num_modules'] = 4
     else:
         raise NotImplementedError(f"search algorithm {algo_name} is not implemented")
 

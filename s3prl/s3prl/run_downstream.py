@@ -38,7 +38,7 @@ def get_downstream_args():
     parser.add_argument('--search_algo', type=str, 
                         help='Specified algorithm for architecture search. Default algorithm is GDAS.', 
                         default='gdas', 
-                        choices=['gdas', 'darts', 'fair_darts', 'gumbel_darts', 's3delta'])
+                        choices=['gdas', 'darts', 'fair_darts', 'gumbel_darts', 's3delta', 'adamix'])
     parser.add_argument('--random_exp', action='store_true', help='Run random experiment for adapter placement')
     parser.add_argument('--rand_seq', type=int, default=0)
     parser.add_argument('--rand_arch', default='random_exp/rand.json')

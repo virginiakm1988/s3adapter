@@ -11,6 +11,7 @@ import uuid
 import logging
 import loralib as lora
 import functools
+import random
 from enum import Enum, EnumMeta
 from dataclasses import dataclass, field
 from copy import deepcopy
@@ -3299,8 +3300,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
             self.delta_modules = [
                 delta_modules[adapter_name](
                     self, 
-                    re_init=self.adapter_config.adapter.switch.algo.re_init,
-                    config=eval(f'self.adapter_config.adapter.{adapter_name}')
+                    # re_init=self.adapter_config.adapter.switch.algo.re_init,
+                    config=eval(f'self.adapter_config.adapter.{adapter_name}'),
+                    num_modules=self.adapter_config.adapter.switch.algo.num_modules
                 ) 
                 for adapter_name in self.used_adapter
             ]
@@ -3309,6 +3311,8 @@ class TransformerSentenceEncoderLayer(nn.Module):
             self.delta_modules = np.array(self.delta_modules)
             self.curr_modules = self.delta_modules
             self.delta_list = nn.ModuleList(self.delta_modules)
+
+            self.up_idx, self.down_idx = 0, 0
 
             for delta in self.delta_list:
                 for name, value in delta.named_parameters():
@@ -3413,6 +3417,32 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 layer_result = torch.stack(all_layer_result, dim=0).sum(dim=0)
         else:
             # Stage 2
+            up_idx, down_idx = random.randrange(len(self.delta_list)), random.randrange(len(self.delta_list))
+            if self.used_adapter[0] == 'seq':
+                x1, (attn1, layer_result1) = self.curr_modules[0](
+                    x, self, 
+                    self_attn_mask=self_attn_mask, 
+                    self_attn_padding_mask=self_attn_padding_mask, 
+                    need_weights=need_weights, 
+                    att_args=att_args,
+                    layer_norm_first=self.layer_norm_first,
+                    up_idx=self.up_idx,
+                    down_idx=self.down_idx
+                )
+
+                # x2, (attn2, layer_result2) = self.curr_modules[0](
+                #     x, self, 
+                #     self_attn_mask=self_attn_mask, 
+                #     self_attn_padding_mask=self_attn_padding_mask, 
+                #     need_weights=need_weights, 
+                #     att_args=att_args,
+                #     layer_norm_first=self.layer_norm_first,
+                #     up_idx=up_idx2,
+                #     down_idx=down_idx2
+                # )
+
+                # return torch.stack([x1, x2], dim=0), torch.stack([attn1, attn2], dim=0), torch.stack([layer_result1, layer_result2], dim=0)
+                return x1, (attn1, layer_result1)
             if self.adapterswitch.fixed_idx:
                 all_x, all_layer_result = [], []
                 for idx in self.adapterswitch.fixed_idx:
@@ -3439,6 +3469,19 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 )
             
         return x, (attn, layer_result)        
+
+    def sample_adapter(self, diff_from_prev=False):
+        if diff_from_prev:
+            up_idx2 = self.up_idx
+            while up_idx2 == self.up_idx:
+                up_idx2 = random.randrange(self.adapter_config.adapter.switch.algo.num_modules)
+            down_idx2 = self.down_idx
+            while down_idx2 == self.down_idx:
+                down_idx2 = random.randrange(self.adapter_config.adapter.switch.algo.num_modules)
+            self.up_idx = up_idx2
+            self.down_idx = down_idx2
+        else:            
+            self.up_idx, self.down_idx = random.randrange(self.adapter_config.adapter.switch.algo.num_modules), random.randrange(self.adapter_config.adapter.switch.algo.num_modules)
 
     def aux_loss(self):
         return self.adapterswitch.aux_loss()

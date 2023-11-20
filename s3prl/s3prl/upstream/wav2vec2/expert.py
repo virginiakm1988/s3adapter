@@ -51,6 +51,10 @@ class UpstreamExpert(UpstreamBase):
     def reduce_tau(self):
         for layer in self.model.encoder.layers:
             layer.adapterswitch.reduce_tau()
+
+    def sample_adapter(self, diff_from_prev=False):
+        for layer in self.model.encoder.layers:
+            layer.sample_adapter(diff_from_prev=diff_from_prev)
     
     def compute_zeta(self, max_num_param: float, tau: float, eps=1e-7):
         flatten_alpha = torch.stack(self.model.all_alpha(), dim=0).view(-1).tolist()

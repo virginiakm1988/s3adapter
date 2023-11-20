@@ -18,6 +18,7 @@ import logging
 from utility.helper import is_leader_process
 from dataclasses import dataclass, field
 from argparse import Namespace
+from copy import deepcopy
 
 '''
 class Activation_Function_Class(nn.Module):
@@ -830,20 +831,27 @@ class Gumbel:
         return y
     
 class PAdapter(nn.Module):
-    def __init__(self, parentModule: nn.Module, re_init=False, config=None) -> None:
+    def __init__(self, parentModule: nn.Module, re_init=False, config=None, num_modules=1) -> None:
         super().__init__()
         
-        for name, module in parentModule.named_children():
-            # self.add_module(name, module)
-            pass
-            
         emb_dim = parentModule.embedding_dim
-        self.adapter = nn.Sequential(
+        if num_modules == 1:
+            self.adapter = nn.Sequential(
+                        nn.Linear(emb_dim, config.bottleneck_dim),
+                        nn.GELU(),
+                        nn.Linear(config.bottleneck_dim, emb_dim),
+                    )
+        else:
+            self.all_adapter = nn.ModuleList(
+                nn.Sequential(
                     nn.Linear(emb_dim, config.bottleneck_dim),
                     nn.GELU(),
                     nn.Linear(config.bottleneck_dim, emb_dim),
                 )
+            )
+            self.adapter = {'up_proj': None, 'down_proj': None}
         self.name = 'para'
+        self.num_modules = num_modules
         self.attn = self.layer_result = None
         # self.activation_fn = parentModule.activation_fn
         self.num_param = sum(p.nelement() for p in self.parameters())
@@ -851,6 +859,23 @@ class PAdapter(nn.Module):
     @property
     def num_parameter(self):
         return (self.num_param / 1e6)
+    
+    def train(self, mode=True):
+        if not mode:
+            if self.num_modules > 1:
+                self.adapter['down_proj'] = deepcopy(self.all_adapter[0][0])
+                self.adapter['up_proj'] = deepcopy(self.all_adapter[0][2])
+                # Down Project
+                self.adapter['down_proj'].weight = torch.mean(torch.stack([dp[0].weight for dp in self.all_adpater], dim=0), dim=0)
+                self.adapter['down_proj'].bias = torch.mean(torch.stack([dp[0].bias for dp in self.all_adpater], dim=0), dim=0)
+                # Up Project
+                self.adapter['up_proj'].weight = torch.mean(torch.stack([dp[2].weight for dp in self.all_adpater], dim=0), dim=0)
+                self.adapter['up_proj'].bias = torch.mean(torch.stack([dp[2].bias for dp in self.all_adpater], dim=0), dim=0)
+
+        return self
+
+    def eval(self):
+        return self.train(False)
     
     def forward(self, x, parent, **kwargs):
         residual = x
@@ -860,6 +885,12 @@ class PAdapter(nn.Module):
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
         layer_norm_first = kwargs['layer_norm_first']
+
+        if kwargs.get('up_idx', False):
+            self.adapter['up_proj'] = self.all_adapter[kwargs['up_idx']][2]
+        if kwargs.get('down_idx', False):
+            self.adapter['down_proj'] = self.all_adapter[kwargs['down_idx']][0]
+
         if layer_norm_first:
             x = parent.self_attn_layer_norm(x)
             x, self.attn = parent.self_attn(
@@ -883,7 +914,11 @@ class PAdapter(nn.Module):
             self.layer_result = x
 
             x = parent.dropout3(x)
-            adapter_output = self.adapter(parallel_input)
+
+            if self.num_modules == 1:
+                adapter_output = self.adapter(parallel_input)
+            else:
+                adapter_output = self.adapter['up_proj'](nn.GELU(self.adapter['down_proj'](parallel_input)))
                 
             x = x + adapter_output + residual
         else:
@@ -909,8 +944,12 @@ class PAdapter(nn.Module):
             self.layer_result = x
 
             x = parent.dropout3(x)
-            adapter_output = self.adapter(parallel_input)
-                
+
+            if self.num_modules == 1:
+                adapter_output = self.adapter(parallel_input)
+            else:
+                adapter_output = self.adapter['up_proj'](nn.GELU(self.adapter['down_proj'](parallel_input)))
+               
             x = x + adapter_output + residual
             
             x = parent.final_layer_norm(x)
@@ -918,7 +957,7 @@ class PAdapter(nn.Module):
         return x, (self.attn, self.layer_result)
 
 class SAdapter(nn.Module):
-    def __init__(self, parentModule: nn.Module, re_init=False, config=None) -> None:
+    def __init__(self, parentModule: nn.Module, re_init=False, config=None, num_modules=1) -> None:
         super().__init__()
         
         for name, module in parentModule.named_children():
@@ -926,11 +965,23 @@ class SAdapter(nn.Module):
             # self.add_module(name, module)
             
         emb_dim = parentModule.embedding_dim
-        self.adapter = nn.Sequential(
+        self.num_modules = num_modules
+        if self.num_modules == 1:
+            self.adapter = nn.Sequential(
+                        nn.Linear(emb_dim, config.bottleneck_dim),
+                        nn.GELU(),
+                        nn.Linear(config.bottleneck_dim, emb_dim),
+                    )
+        else:
+            print(f'Create {self.num_modules} adapters.')
+            self.all_adapter = nn.ModuleList(
+                nn.Sequential(
                     nn.Linear(emb_dim, config.bottleneck_dim),
                     nn.GELU(),
                     nn.Linear(config.bottleneck_dim, emb_dim),
-                )
+                ) for _ in range(self.num_modules)
+            )
+            self.adapter = {'up_proj': None, 'down_proj': None}
         
         self.name = 'seq'
         self.attn = self.layer_result = None
@@ -940,6 +991,23 @@ class SAdapter(nn.Module):
     @property
     def num_parameter(self):
         return self.num_param / 1e6
+    
+    def train(self, mode=True):
+        if not mode:
+            if self.num_modules > 1:
+                self.adapter['down_proj'] = deepcopy(self.all_adapter[0][0])
+                self.adapter['up_proj'] = deepcopy(self.all_adapter[0][2])
+                # Down Project
+                self.adapter['down_proj'].weights = torch.nn.Parameter(torch.mean(torch.stack([dp[0].weight for dp in self.all_adapter], dim=0), dim=0))
+                self.adapter['down_proj'].bias = torch.nn.Parameter(torch.mean(torch.stack([dp[0].bias for dp in self.all_adapter], dim=0), dim=0))
+                # Up Project
+                self.adapter['up_proj'].weights = torch.nn.Parameter(torch.mean(torch.stack([dp[2].weight for dp in self.all_adapter], dim=0), dim=0))
+                self.adapter['up_proj'].bias = torch.nn.Parameter(torch.mean(torch.stack([dp[2].bias for dp in self.all_adapter], dim=0), dim=0))
+
+        return self
+
+    def eval(self):
+        return self.train(False)
     
     def forward(self, x, parent: nn.Module, **kwargs):
         residual = x
@@ -973,7 +1041,12 @@ class SAdapter(nn.Module):
             self.layer_result = x
 
             x = parent.dropout3(x)
-            adapter_output = self.adapter(houlsby_input)
+            
+            if self.num_modules == 1:
+                adapter_output = self.adapter(houlsby_input)
+            else:
+                adapter_output = self.adapter['up_proj'](F.gelu(self.adapter['down_proj'](houlsby_input)))
+            
             x = x + adapter_output + residual
         else:
             x, self.attn = parent.self_attn(
@@ -999,7 +1072,12 @@ class SAdapter(nn.Module):
             self.layer_result = x
 
             x = parent.dropout3(x)
-            adapter_output = self.adapter(houlsby_input)
+            
+            if self.num_modules == 1:
+                adapter_output = self.adapter(houlsby_input)
+            else:
+                adapter_output = self.adapter['up_proj'](F.gelu(self.adapter['down_proj'](houlsby_input)))
+            
             x = x + adapter_output + residual
 
             x = parent.final_layer_norm(x)

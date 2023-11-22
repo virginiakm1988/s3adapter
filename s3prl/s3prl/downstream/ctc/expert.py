@@ -14,6 +14,7 @@ from ..asr.model import *
 from .text import load_text_encoder
 from .data import load_dataset
 from .metric import *
+import logging
 
 
 class DownstreamExpert(nn.Module):
@@ -121,8 +122,6 @@ class DownstreamExpert(nn.Module):
             log_probs = kwargs['log_probs']
             log_probs_len = features_len
         
-        if kwargs.get("return_log_probs", False):
-            return log_probs
         
         loss = self.objective(
             log_probs.transpose(0, 1),  # (N, T, C) -> (T, N, C)
@@ -145,6 +144,7 @@ class DownstreamExpert(nn.Module):
             self.tokenizer.decode(h) for h in filtered_consecutive
         ]
         records["hyp_consecutive"] += hyp_consecutive
+        # logging.warning(f"hyp_consecutive: {len(records['hyp_consecutive'])}")
         for pred_token in pred_tokens:
             pred_token = pred_token.unique_consecutive()
             filtered_token = [
@@ -162,6 +162,8 @@ class DownstreamExpert(nn.Module):
         records["hypothesis"] += hypothesis
         records["groundtruth"] += groundtruth
         records["filename"] += filenames
+        if kwargs.get("return_log_probs", False):
+            return log_probs
         # if kwargs.get("return_log_probs", False):
         #     records["log_probs"] += log_probs.cpu().tolist()
         return loss

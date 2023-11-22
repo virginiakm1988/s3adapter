@@ -511,13 +511,15 @@ class EnsembleRunner():
         # prepare data
         dataloader = self.real_downstream.model.get_dataloader(split)
         evaluate_ratio = float(self.config["runner"].get("evaluate_ratio", 1))
+        # HACK
+        evaluate_ratio = 0.01
         evaluate_steps = round(len(dataloader) * evaluate_ratio)
 
         inputs, outputs, labels = [], [], []
         all_hiddens = defaultdict(list)
         batch_ids = []
         # records = defaultdict(list)
-        records = defaultdict(lambda x: defaultdict(list))
+        records = defaultdict(lambda: defaultdict(list))
         for batch_id, (wavs, *others) in enumerate(tqdm(dataloader, dynamic_ncols=True, desc=split, total=evaluate_steps)):
             if batch_id > evaluate_steps:
                 break
@@ -536,17 +538,26 @@ class EnsembleRunner():
                         batch_id = batch_id,
                         return_log_probs = True
                     )
+                    # logging.warning(records[exp_name].keys())
                     all_log_probs.append(log_probs)
                 '''
                 all_log_probs = torch.stack(all_log_probs, dim=0)  # 3 * N * T * C
                 
                 for _idx, _seqs in enumerate(zip(*all_log_probs)):
+                    
                     merged_seqs = self.merge_all(_seqs)  # 3 * T * C
-                    all_log_probs[:, _idx, :, :] = torch.stack(merged_seqs, dim=0)
+                    # all_log_probs[:, _idx, :, :] = torch.stack(merged_seqs, dim=0)
+                    self.real_downstream.model(
+                        split,
+                        features, *others,
+                        records = records["real"],
+                        batch_id = batch_id,
+                        log_probs = torch.stack(merged_seqs).mean(dim=0).unsqueeze(0)
+                    )
                 '''
                 batch_ids.append(batch_id)
                 avg_log_probs = torch.stack(all_log_probs, dim=0).mean(dim=0)
-                avg_log_probs = all_log_probs.mean(dim=0)
+                # avg_log_probs = all_log_probs.mean(dim=0)
                 self.real_downstream.model(
                     split,
                     features, *others,
@@ -556,10 +567,14 @@ class EnsembleRunner():
                 )
 
         # logging
-        for _exp_dir, _records in records.items(): 
-            hyp_cons = _records["hyp_consecutive"]
-            gts = _records["groundtruth"]
-            logging.info(_exp_dir)
+        for _exp_dir, _record in records.items(): 
+            logging.warning(_record.keys())
+            if _exp_dir == "real":
+                continue
+            hyp_cons = _record["hyp_consecutive"]
+            gts = _record["groundtruth"]
+            
+            logging.warning(_exp_dir)
             with open(os.path.join(_exp_dir, 'hyp_cons.json'), 'w') as f:
                 json_data = json.dumps(hyp_cons, cls=NpEncoder)
                 f.write(json_data)
@@ -617,8 +632,9 @@ class EnsembleRunner():
                 else:
                     for di, dj in [(-1, 0), (-1, -1), (0, -1)]:
                         nx, ny = i + di, j + dj
-                        if abs(i - j) < 10:
-                            logging.warning(f"({nx}, {ny}) : {dp[nx][ny] + np.linalg.norm(s1[i] - s2[j], ord=2):.5f}")
+                        if abs(i - j) < 2:
+                            pass
+                            # logging.warning(f"({nx}, {ny}) : {dp[nx][ny] + np.linalg.norm(s1[i] - s2[j], ord=2):.5f}")
                         if dp[nx][ny] + np.linalg.norm(s1[i] - s2[j], ord=2) < dp[i][j]:
                             frm[i][j] = (nx, ny)
                             dp[i][j] = dp[nx][ny] + np.linalg.norm(s1[i] - s2[j], ord=2)
@@ -642,12 +658,17 @@ class EnsembleRunner():
         return (s1[ret1] + s2[ret2]) / 2, ret1, ret2, dp[-1][-1]
 
 
-    def merge_all(self, seqs):
+    def merge_all(self, seqs, blank_prob=0.97):
         processed_idx = 1
+        for _sid, _seq in enumerate(seqs):
+            if blank_prob >= 0:
+                # filter idx that blank prob > 0.97
+                high_prob_blank_idx = (_seq[:, self.tokenizer.pad_idx] < blank_prob)
+                seqs[_sid] = _seq[high_prob_blank_idx]
         copied_seqs = [seqs[0]]
         while ((processed_idx) < len(seqs)):
             logging.warn(f"processing {processed_idx}")
-            aligned_seq, aln1, aln2, score = self.compare_sequence(seqs[-1], seqs[processed_idx])
+            aligned_seq, aln1, aln2, score = self.compare_sequence(copied_seqs[-1], seqs[processed_idx])
             for i, _seq in enumerate(copied_seqs):
                 copied_seqs[i] = _seq[aln1]
             copied_seqs.append(seqs[processed_idx][aln2])

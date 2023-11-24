@@ -540,12 +540,11 @@ class EnsembleRunner():
                     )
                     # logging.warning(records[exp_name].keys())
                     all_log_probs.append(log_probs)
-                '''
+                # '''
                 all_log_probs = torch.stack(all_log_probs, dim=0)  # 3 * N * T * C
-                
                 for _idx, _seqs in enumerate(zip(*all_log_probs)):
                     
-                    merged_seqs = self.merge_all(_seqs)  # 3 * T * C
+                    merged_seqs = self.merge_all(list(_seqs))  # 3 * T * C
                     # all_log_probs[:, _idx, :, :] = torch.stack(merged_seqs, dim=0)
                     self.real_downstream.model(
                         split,
@@ -554,10 +553,11 @@ class EnsembleRunner():
                         batch_id = batch_id,
                         log_probs = torch.stack(merged_seqs).mean(dim=0).unsqueeze(0)
                     )
-                '''
+                # '''
                 batch_ids.append(batch_id)
+                '''
                 avg_log_probs = torch.stack(all_log_probs, dim=0).mean(dim=0)
-                # avg_log_probs = all_log_probs.mean(dim=0)
+                
                 self.real_downstream.model(
                     split,
                     features, *others,
@@ -565,7 +565,7 @@ class EnsembleRunner():
                     batch_id = batch_id,
                     log_probs = avg_log_probs
                 )
-
+                '''
         # logging
         for _exp_dir, _record in records.items(): 
             logging.warning(_record.keys())
@@ -610,7 +610,7 @@ class EnsembleRunner():
         return [] if type(save_names) is not list else save_names
     
     
-    def compare_sequence(self, s1, s2):
+    def compare_sequence(self, s1, s2, blank1=None, blank2=None):
         # T * C
         s1 = s1.detach().cpu().numpy()
         s2 = s2.detach().cpu().numpy()
@@ -655,24 +655,89 @@ class EnsembleRunner():
         logging.warning(f"{len(ret1)}, {len(ret2)}")
         ret1 = torch.tensor(ret1[::-1])
         ret2 = torch.tensor(ret2[::-1])
-        return (s1[ret1] + s2[ret2]) / 2, ret1, ret2, dp[-1][-1]
+        new_blanks = []
+        if blank1 and blank2:
+            max_id = -1
+            blank_id = 0
+            for _i, e in enumerate(ret1):
+                if blank_id >= len(blank1):
+                    break
+                if e > max_id:
+                    if e == blank1[blank_id]:
+                        new_blanks.append(_i)
+                        blank_id += 1
+                    max_id = e
+            '''
+            max_id = -1
+            blank_id = 0
+            for _i, e in enumerate(ret2):
+                if blank_id >= len(blank2):
+                    break
+                if e > max_id:
+                    if e == blank2[blank_id]:
+                        new_blanks.append(_i)
+                        blank_id += 1
+                    max_id = e
+            '''
+            new_blanks = sorted(list(set(new_blanks)))
+            new_blanks = torch.tensor(new_blanks)
+        return (s1[ret1] + s2[ret2]) / 2, ret1, ret2, dp[-1][-1], new_blanks
 
 
-    def merge_all(self, seqs, blank_prob=0.97):
+    def parse_blank_pos(self, blank):
+        new_blank = []
+        cnt_ = 0
+        for _i, e in enumerate(blank):
+            if e:
+                cnt_ += 1
+            else:
+                if not _i or blank[_i - 1]:
+                    new_blank.append(cnt_)
+
+        return new_blank
+
+    def merge_all(self, seqs, blank_prob=0.99):
         processed_idx = 1
+        blanks = [[] for _ in range(len(seqs))]
         for _sid, _seq in enumerate(seqs):
+            soft_seq = torch.nn.functional.softmax(_seq, dim=-1)
+            log_seq = torch.nn.functional.log_softmax(_seq, dim=-1)
             if blank_prob >= 0:
+                black_probs = soft_seq[:, self.real_downstream.model.tokenizer.pad_idx]
+                logging.warning(f"{torch.sort(black_probs, descending=True)[0][:10]}")
                 # filter idx that blank prob > 0.97
-                high_prob_blank_idx = (_seq[:, self.tokenizer.pad_idx] < blank_prob)
-                seqs[_sid] = _seq[high_prob_blank_idx]
+                high_prob_blank_idx = (soft_seq[:, self.real_downstream.model.tokenizer.pad_idx] < blank_prob)
+                logging.warning(f"{torch.sum(~high_prob_blank_idx)}")
+                blanks[_sid] = self.parse_blank_pos(high_prob_blank_idx)
+                logging.warning(f"{blanks[_sid]}")
+                seqs[_sid] = soft_seq[high_prob_blank_idx]
+            else:
+                seqs[_sid] = soft_seq
         copied_seqs = [seqs[0]]
+        copied_blanks = [blanks[0]]
         while ((processed_idx) < len(seqs)):
             logging.warn(f"processing {processed_idx}")
-            aligned_seq, aln1, aln2, score = self.compare_sequence(copied_seqs[-1], seqs[processed_idx])
+            aligned_seq, aln1, aln2, score, *ret = self.compare_sequence(copied_seqs[-1], seqs[processed_idx], copied_blanks[-1], blanks[processed_idx])
             for i, _seq in enumerate(copied_seqs):
                 copied_seqs[i] = _seq[aln1]
+                copied_blanks[i] = ret[0]
             copied_seqs.append(seqs[processed_idx][aln2])
+            copied_blanks.append(ret[0])
             processed_idx += 1
             
+
+        logging.warning(copied_blanks[-1])
+        for _i, _seq in enumerate(copied_seqs):
+            new_seq = []
+            for _j, _token in enumerate(_seq):
+                _blank_id = 0
+                while(_blank_id < len(copied_blanks[-1]) and copied_blanks[-1][_blank_id] <= _j):
+                    _blank_id += 1
+                    # append a one hot tensor with pad_idx
+                    new_seq.append(torch.zeros_like(_token))
+                    new_seq[-1][self.real_downstream.model.tokenizer.pad_idx] = blank_prob
+                new_seq.append(_token)
+            
+            copied_seqs[_i] = torch.stack(new_seq)
         return copied_seqs
             

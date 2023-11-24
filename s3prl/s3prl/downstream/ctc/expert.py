@@ -128,7 +128,7 @@ class DownstreamExpert(nn.Module):
             labels,
             log_probs_len,
             labels_len,
-        )
+        ) if kwargs.get('log_probs', None) is None else torch.FloatTensor([0]).to(device)
         records["loss"].append(loss.item())
 
         pred_tokens = log_probs.argmax(dim=-1)
@@ -163,7 +163,7 @@ class DownstreamExpert(nn.Module):
         records["groundtruth"] += groundtruth
         records["filename"] += filenames
         if kwargs.get("return_log_probs", False):
-            return log_probs
+            return logits
         # if kwargs.get("return_log_probs", False):
         #     records["log_probs"] += log_probs.cpu().tolist()
         return loss

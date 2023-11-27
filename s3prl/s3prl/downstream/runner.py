@@ -685,7 +685,7 @@ class Runner():
                     global_step = pbar.n * (1 + (self.stage == 1)) + (1 + mode_id) + delta_step * (self.stage == 2)
 
                     if adapterMode == 'train':
-                        curr_bids, last_bid = \
+                        curr_bids, last_bid, *others = \
                             self.train_weight(
                                 data = all_data[adapterMode],
                                 train_split = train_split,
@@ -719,6 +719,8 @@ class Runner():
                     
                     batch_ids += curr_bids
                     batch_id = last_bid
+                    if self.adapter_config.adapter.switch.algo.name == 'adamix':
+                        records['grad_norm'] += others
                 # linelogger.info(f'norm_weights: {self.featurizer.model.get_norm_weights}')
                 if self.stage < 2 and self.adapter_config.adapter.switch.tau.type != "const":
                     self.upstream.model.reduce_tau()
@@ -1085,12 +1087,14 @@ class Runner():
                 batch_id += 1
                 batch_ids.append(batch_id)
                 
-                logits_main = F.softmax(logits_main, dim=-1)
-                logits_sub = F.softmax(logits_sub, dim=-1)
+                # Fuck
+                # logits_main = F.softmax(logits_main, dim=-1)
+                # logits_sub = F.softmax(logits_sub, dim=-1)
 
-                kl_loss = 0.5 * (F.kl_div(logits_main, logits_sub) + F.kl_div(logits_sub, logits_main))
+                kl_loss = F.kl_div(F.log_softmax(logits_main, dim=-1), F.softmax(logits_sub.detach(), dim=-1), reduction='batchmean') \
+                        + F.kl_div(F.log_softmax(logits_sub, dim=-1), F.softmax(logits_main.detach(), dim=-1), reduction='batchmean')
                 # exit(0)
-                ((kl_loss + loss) / gradient_accumulate_steps).backward()
+                ((loss + 0.5 * kl_loss) / gradient_accumulate_steps).backward()
                 del loss, kl_loss
 
                 # Update progress bar
@@ -1120,6 +1124,9 @@ class Runner():
         # adjust learning rate
         if scheduler:
             scheduler.step()
+        
+        if self.adapter_config.adapter.switch.algo.name == 'adamix':
+            return batch_ids, batch_id, grad_norm
 
         return batch_ids, batch_id
     

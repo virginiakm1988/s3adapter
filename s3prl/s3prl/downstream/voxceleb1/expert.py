@@ -209,6 +209,12 @@ class DownstreamExpert(nn.Module):
             )
             results.update({f'{mode}-total_loss': total_loss})
 
+            if len(records['grad_norm']):
+                results.update({f'{mode}-grad_norm': torch.FloatTensor(records['grad_norm']).mean().item()})
+                logger.add_scalar(
+                    f'voxceleb1/{mode}-grad_norm', total_loss, global_step=global_step
+                )
+
         if 'layers' in kwargs:
             for i, layer in enumerate(kwargs['layers']):
                 # results.update({f"{key_prefix}": list(layer.adapterswitch.switch_logits.cpu())})

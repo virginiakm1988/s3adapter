@@ -156,6 +156,8 @@ class DownstreamExpert(nn.Module):
         records["predict"] += [self.test_dataset.idx2emotion[idx] for idx in predicted_classid.cpu().tolist()]
         records["truth"] += [self.test_dataset.idx2emotion[idx] for idx in labels.cpu().tolist()]
 
+        if kwargs.get('return_predicted', False):
+            return loss, predicted
         return loss
 
     # interface
@@ -209,6 +211,12 @@ class DownstreamExpert(nn.Module):
                 f'emotion-{self.fold}/{mode}-total_loss', total_loss, global_step=global_step
             )
             results.update({f'{mode}-total_loss': total_loss})
+
+            if len(records['grad_norm']):
+                results.update({f'{mode}-grad_norm': torch.FloatTensor(records['grad_norm']).mean().item()})
+                logger.add_scalar(
+                    f'emotion-{self.fold}/{mode}-grad_norm', total_loss, global_step=global_step
+                )
 
         if mode in ["dev", "test"]:
             with open(Path(self.expdir) / f"{mode}_{self.fold}_predict.txt", "w") as file:

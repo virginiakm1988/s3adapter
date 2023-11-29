@@ -648,14 +648,16 @@ class EnsembleRunner():
             # print(f"lattice: {nx}, {ny}, {fx}, {fy}")
             nx, ny = fx, fy
 
-        logging.info(ret1)
-        logging.info(ret2)
+        
+        # logging.info(ret2)
         ret1.append(0)
         ret2.append(0)
         logging.warning(f"{len(ret1)}, {len(ret2)}")
         ret1 = torch.tensor(ret1[::-1])
         ret2 = torch.tensor(ret2[::-1])
-        new_blanks = []
+        logging.warning(ret1)
+        logging.warning(ret2)
+        new_blank1, new_blank2 = [], []
         if blank1 and blank2:
             max_id = -1
             blank_id = 0
@@ -664,10 +666,10 @@ class EnsembleRunner():
                     break
                 if e > max_id:
                     if e == blank1[blank_id]:
-                        new_blanks.append(_i)
+                        new_blank1.append(_i)
                         blank_id += 1
                     max_id = e
-            '''
+            
             max_id = -1
             blank_id = 0
             for _i, e in enumerate(ret2):
@@ -675,13 +677,17 @@ class EnsembleRunner():
                     break
                 if e > max_id:
                     if e == blank2[blank_id]:
-                        new_blanks.append(_i)
+                        new_blank2.append(_i)
                         blank_id += 1
                     max_id = e
-            '''
-            new_blanks = sorted(list(set(new_blanks)))
-            new_blanks = torch.tensor(new_blanks)
-        return (s1[ret1] + s2[ret2]) / 2, ret1, ret2, dp[-1][-1], new_blanks
+            
+            new_blank1 = sorted(list(set(new_blank1)))
+            new_blank2 = sorted(list(set(new_blank2)))
+            new_blank1 = torch.tensor(new_blank1)
+            new_blank2 = torch.tensor(new_blank2)
+        logging.warning(f"{new_blank1}")
+        logging.warning(f"{new_blank2}")
+        return (s1[ret1] + s2[ret2]) / 2, ret1, ret2, dp[-1][-1], new_blank1, new_blank2
 
 
     def parse_blank_pos(self, blank):
@@ -729,15 +735,19 @@ class EnsembleRunner():
         logging.warning(copied_blanks[-1])
         for _i, _seq in enumerate(copied_seqs):
             new_seq = []
+            _blank_id = 0
             for _j, _token in enumerate(_seq):
-                _blank_id = 0
-                while(_blank_id < len(copied_blanks[-1]) and copied_blanks[-1][_blank_id] <= _j):
+                if(_blank_id < len(copied_blanks[-1])):
+                    pass
+                    # logging.warning(f"Dbg: {_j}, {_blank_id}, {copied_blanks[-1][_blank_id]}")
+                if(_blank_id < len(copied_blanks[-1]) and copied_blanks[-1][_blank_id] <= _j):
                     _blank_id += 1
                     # append a one hot tensor with pad_idx
                     new_seq.append(torch.zeros_like(_token))
-                    new_seq[-1][self.real_downstream.model.tokenizer.pad_idx] = blank_prob
+                    new_seq[-1][self.real_downstream.model.tokenizer.pad_idx] = 1.
                 new_seq.append(_token)
             
             copied_seqs[_i] = torch.stack(new_seq)
+            logging.warning(torch.where(copied_seqs[_i][:, self.real_downstream.model.tokenizer.pad_idx] > blank_prob))
         return copied_seqs
             

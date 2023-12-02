@@ -39,5 +39,10 @@ adapter:
   lora:
     rank: 8
 
+  mix:
+    used_adapter: ['seq', 'para', 'lora']
+    bottleneck_dim: 10
+    rank: 2
+
   bitfit:
     

@@ -36,7 +36,7 @@ scheduler:
 downstream_expert:
   corpus:                                 
     name: 'libriphone'                   # Specify corpus
-    path: '/home/koredata/hao/LibriSpeech'          # Path to raw LibriSpeech dataset
+    path: '/work/u2752721/LibriSpeech'          # Path to raw LibriSpeech dataset
     lexicon:
       # - downstream/ctc/lexicon/librispeech-lexicon.txt
       - downstream/ctc/lexicon/librispeech-lexicon-200k-g2p.txt

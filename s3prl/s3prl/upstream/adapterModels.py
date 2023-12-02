@@ -1128,6 +1128,168 @@ class LoRAAdapter(nn.Module):
         return lora_out, (self.attn, self.layer_result)
 
 
+class MixAdapter(nn.Module):
+    def __init__(self, parentModule: nn.Module, re_init=False, config=None) -> None:
+        super().__init__()
+            
+        emb_dim = parentModule.embedding_dim
+        self.use_seq = ('seq' in config.used_adapter)
+        if self.use_seq:
+            self.seq_adapter = nn.Sequential(
+                        nn.Linear(emb_dim, config.bottleneck_dim),
+                        nn.GELU(),
+                        nn.Linear(config.bottleneck_dim, emb_dim),
+                    )
+        self.use_para = ('para' in config.used_adapter)
+        if self.use_para:
+            self.para_adapter = nn.Sequential(
+                    nn.Linear(emb_dim, config.bottleneck_dim),
+                    nn.GELU(),
+                    nn.Linear(config.bottleneck_dim, emb_dim),
+                )
+        
+        self.use_lora = ('lora' in config.used_adapter)
+        if self.use_lora:
+            self.lora_keys = ['q_proj', 'v_proj']
+            for name, module in parentModule.named_parameters():
+                for loraName in ['q_proj', 'v_proj']:
+                    if loraName in name and not getattr(module, '__is_delta__', False) and not getattr(module, '__is_virtual__', False):
+                        loraKey = name.split(loraName)[0] + loraName
+                        parent, lastKey, child = find_module(parentModule, loraKey)
+                        if getattr(self, lastKey, False):
+                            continue
+                        outdim, indim  = child.weight.shape
+                        setattr(self, lastKey, quant_noise(lora.Linear(indim, outdim, r=config.rank), parentModule.self_attn.q_noise, parentModule.self_attn.qn_block_size))
+                        ref = getattr(self, lastKey, None)
+                        ref.weight = child.weight
+                        ref.bias = child.bias
+        
+        self.name = 'mix'
+        self.attn = self.layer_result = None
+        # self.activation_fn = parentModule.activation_fn
+        # self.num_param = sum(p.nelement() for p in self.parameters())
+    
+    # @property
+    # def num_parameter(self):
+        # return self.num_param / 1e6
+
+    def lora_weights(self):
+        ref = {key: getattr(self, key, None) for key in self.lora_keys}
+        return {
+            key: {'lora_A': ref[key].lora_A, 'lora_B': ref[key].lora_B}
+            for key in self.lora_keys
+        }
+    
+    def lora_scaling(self):
+        ref = {key: getattr(self, key, None) for key in self.lora_keys}
+        return {
+            key: ref[key].scaling
+            for key in self.lora_keys
+        }
+    
+    def forward(self, x, parent: nn.Module, **kwargs):
+        residual = x
+        para_input = x
+        self_attn_mask = kwargs['self_attn_mask']
+        self_attn_padding_mask = kwargs['self_attn_padding_mask']
+        need_weights = kwargs['need_weights']
+        att_args = kwargs['att_args']
+        layer_norm_first = kwargs['layer_norm_first']
+        if layer_norm_first:
+            x = parent.self_attn_layer_norm(x)
+
+            if self.use_lora:
+                x, self.attn = parent.self_attn(
+                    query=x,
+                    key=x,
+                    value=x,
+                    key_padding_mask=self_attn_padding_mask,
+                    need_weights=False,
+                    use_lora=True,
+                    lora_weights = self.lora_weights(),
+                    lora_scaling = self.lora_scaling()
+                )
+            else:
+                x, self.attn = parent.self_attn(
+                    query=x,
+                    key=x,
+                    value=x,
+                    key_padding_mask=self_attn_padding_mask,
+                    need_weights=False,
+                )
+
+            x = parent.dropout1(x)
+            x = residual + x
+
+            residual = x
+            x = parent.final_layer_norm(x)
+            x = parent.activation_fn(parent.fc1(x))
+            
+            x = parent.dropout2(x)
+            x = parent.fc2(x)
+            
+            seq_input = x
+            self.layer_result = x
+
+            x = parent.dropout3(x)
+            x = x + residual
+            
+            if self.use_seq:
+                seq_output = self.seq_adapter(seq_input)
+                x = x + seq_output
+            if self.use_para:
+                para_output = self.para_adapter(para_input)
+                x = x + para_output
+        else:
+            if self.use_lora:
+                x, self.attn = parent.self_attn(
+                    query=x,
+                    key=x,
+                    value=x,
+                    key_padding_mask=self_attn_padding_mask,
+                    need_weights=False,
+                    use_lora=True,
+                    lora_weights = self.lora_weights(),
+                    lora_scaling = self.lora_scaling()
+                )
+            else:
+                x, self.attn = parent.self_attn(
+                    query=x,
+                    key=x,
+                    value=x,
+                    key_padding_mask=self_attn_padding_mask,
+                    need_weights=False,
+                )
+
+            x = parent.dropout1(x)
+            x = residual + x
+
+            x = parent.self_attn_layer_norm(x)
+
+            residual = x
+            x = parent.activation_fn(parent.fc1(x))
+            
+            x = parent.dropout2(x)
+            x = parent.fc2(x)
+            
+            seq_input = x
+            self.layer_result = x
+
+            x = parent.dropout3(x)
+            x = x + residual
+
+            if self.use_seq:
+                seq_output = self.seq_adapter(seq_input)
+                x = x + seq_output
+            if self.use_para:
+                para_output = self.para_adapter(para_input)
+                x = x + para_output
+            
+            x = parent.final_layer_norm(x)
+
+        return x, (self.attn, self.layer_result)
+
+
 class LNFitAdapter(nn.Module):
     def __init__(self, parentModule):
         super().__init__()

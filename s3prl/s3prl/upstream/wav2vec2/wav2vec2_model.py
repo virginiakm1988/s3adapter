@@ -22,7 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 # for adapters
-from ..adapterModels import AdapterSwitch, AdapterConfig, dict2obj, Skip, SAdapter, PAdapter, LNFitAdapter, LoRAAdapter, BitFitAdapter, quant_noise
+from ..adapterModels import AdapterSwitch, AdapterConfig, dict2obj, Skip, SAdapter, PAdapter, LNFitAdapter, LoRAAdapter, BitFitAdapter, MixAdapter, quant_noise
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -3294,7 +3294,8 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 'para': PAdapter, 
                 'lora': LoRAAdapter, 
                 'lnfit': LNFitAdapter,
-                'bitfit': BitFitAdapter
+                'bitfit': BitFitAdapter,
+                'mix': MixAdapter
             }
             self.delta_modules = [
                 delta_modules[adapter_name](
@@ -3313,6 +3314,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
             for delta in self.delta_list:
                 for name, value in delta.named_parameters():
                     if delta.name == 'lora' and ('lora' not in name):
+                        continue
+                    elif delta.name == 'mix' and 'lora' in self.adapter_config.adapter.mix.used_adapter and \
+                          ('proj' in name and ('lora' not in name)):
                         continue
                     setattr(value, '__is_delta__', True)
             
@@ -3333,6 +3337,9 @@ class TransformerSentenceEncoderLayer(nn.Module):
                 for virtual_delta in self.virtual_list:
                     for name, value in virtual_delta.named_parameters():
                         if virtual_delta.name == 'lora' and ('lora' not in name):
+                            continue
+                        elif virtual_delta.name == 'mix' and 'lora' in self.adapter_config.adapter.mix.used_adapter and \
+                          ('proj' in name and ('lora' not in name)):
                             continue
                         setattr(value, '__is_virtual__', True)
 

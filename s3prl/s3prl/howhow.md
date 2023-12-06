@@ -87,4 +87,6 @@ python3 run_downstream.py -m evaluate -t {testing split} -i {ckpt} -c downstream
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 python3 run_downstream.py -m evaluate -t test -u wav2vec2 -d ctc -f -n test -o "config.adapter_config.type=['seq', 'para', 'lora']" --ensemble result/downstream/wav2vec2_pr_seq_bak/dev-best.ckpt result/downstream/wav2vec2_pr_para_bak/dev-best.ckpt result/downstream/wav2vec2_pr_para_bak/dev-best.ckpt --adapter=houlsby -c downstream/ctc/libriphone.yaml
+
+CUDA_VISIBLE_DEVICES=1 nohup python3 run_downstream.py -m evaluate -t test -u wav2vec2 -d ctc -f -n test -o "config.adapter_config.type=['seq', 'para', 'lora']" --ensemble result/downstream/wav2vec2_pr_seq_bak/dev-best.ckpt result/downstream/wav2vec2_pr_para_bak/dev-best.ckpt --adapter=houlsby -c downstream/ctc/libriphone.yaml | tee /work/u2752721/trash/test_rover.out
 ```

@@ -542,17 +542,28 @@ class EnsembleRunner():
                     all_log_probs.append(log_probs)
                 # '''
                 all_log_probs = torch.stack(all_log_probs, dim=0)  # 3 * N * T * C
+                ens_algo = "dtw"
                 for _idx, _seqs in enumerate(zip(*all_log_probs)):
                     
-                    merged_seqs = self.merge_all(list(_seqs))  # 3 * T * C
+                    merged_seqs = self.merge_all(list(_seqs), algo=ens_algo)  # 3 * T * C
                     # all_log_probs[:, _idx, :, :] = torch.stack(merged_seqs, dim=0)
-                    self.real_downstream.model(
-                        split,
-                        features, *others,
-                        records = records["real"],
-                        batch_id = batch_id,
-                        log_probs = torch.stack(merged_seqs).mean(dim=0).unsqueeze(0)
-                    )
+                    if ens_algo == "dtw":
+                        self.real_downstream.model(
+                            split,
+                            features, *others,
+                            records = records["real"],
+                            batch_id = batch_id,
+                            log_probs = torch.stack(merged_seqs).mean(dim=0).unsqueeze(0)
+                        )
+                    else:
+                        num_classes = all_log_probs.shape[-1]
+                        self.real_downstream.model(
+                            split,
+                            features, *others,
+                            records = records["real"],
+                            batch_id = batch_id,
+                            log_probs = torch.nn.functional.one_hot(merged_seqs, num_classes).unsqueeze(0).float()
+                        )
                 # '''
                 batch_ids.append(batch_id)
                 '''
@@ -702,12 +713,52 @@ class EnsembleRunner():
 
         return new_blank
 
-    def merge_all(self, seqs, blank_prob=0.99):
+
+    def to_onehot(self, seq):
+        # seq: [T * C] -> T * C, C is the number of classes
+        # [0.2, 0.3, 0.5] -> [0, 0, 1]
+        # use torch scatter
+        top_dim = torch.argmax(seq, dim=-1)
+        return torch.nn.functional.one_hot(top_dim, num_classes=seq.shape[-1]).float()
+        
+    def LCS(self, s1, s2):
+        dp = np.zeros([len(s1) + 1, len(s2) + 1]) + np.inf
+        frm = [[(-1, -1) for j in range(len(s2) + 1)] for i in range(len(s1) + 1)]
+        dp[0][0] = 0
+        for i in range(1, len(s1) + 1):
+            dp[i][0] = i
+            frm[i][0] = (i - 1, 0)
+        for j in range(1, len(s2) + 1):
+            dp[0][j] = j
+            frm[0][j] = (0, j - 1)
+        for i in range(1, len(s1) + 1):
+            for j in range(1, len(s2) + 1):
+                for di, dj in [(-1, 0), (-1, -1), (0, -1)]:
+                    nx, ny = i + di, j + dj
+                    if dp[nx][ny] + (s1[i - 1] != s2[j - 1]) < dp[i][j]:
+                        frm[i][j] = (nx, ny)
+                        dp[i][j] = dp[nx][ny] + (s1[i - 1] != s2[j - 1])
+                            
+        seq = []
+        logging.warning(f"Start LCS backtrack")
+        nx, ny = len(s1), len(s2)
+        while(nx > 0 or ny > 0):
+            # logging.warning(f"{nx}, {ny}")
+            fx, fy = frm[nx][ny]
+            if fx == nx - 1 and fy == ny - 1:
+                seq.append(s1[nx - 1])
+            nx, ny = fx, fy
+            
+        return torch.tensor(seq[::-1])
+
+    def merge_all(self, seqs, blank_prob=-1, algo=" "):
         processed_idx = 1
         blanks = [[] for _ in range(len(seqs))]
         for _sid, _seq in enumerate(seqs):
             soft_seq = torch.nn.functional.softmax(_seq, dim=-1)
             log_seq = torch.nn.functional.log_softmax(_seq, dim=-1)
+            if algo == "rover":
+                soft_seq = torch.argmax(soft_seq, dim=-1)
             if blank_prob >= 0:
                 black_probs = soft_seq[:, self.real_downstream.model.tokenizer.pad_idx]
                 logging.warning(f"{torch.sort(black_probs, descending=True)[0][:10]}")
@@ -723,31 +774,41 @@ class EnsembleRunner():
         copied_blanks = [blanks[0]]
         while ((processed_idx) < len(seqs)):
             logging.warn(f"processing {processed_idx}")
-            aligned_seq, aln1, aln2, score, *ret = self.compare_sequence(copied_seqs[-1], seqs[processed_idx], copied_blanks[-1], blanks[processed_idx])
-            for i, _seq in enumerate(copied_seqs):
-                copied_seqs[i] = _seq[aln1]
-                copied_blanks[i] = ret[0]
-            copied_seqs.append(seqs[processed_idx][aln2])
-            copied_blanks.append(ret[0])
-            processed_idx += 1
+            if algo == "dtw":
+                aligned_seq, aln1, aln2, score, *ret = self.compare_sequence(copied_seqs[-1], seqs[processed_idx], copied_blanks[-1], blanks[processed_idx])
+                for i, _seq in enumerate(copied_seqs):
+                    copied_seqs[i] = _seq[aln1]
+                    copied_blanks[i] = ret[0]
+                copied_seqs.append(seqs[processed_idx][aln2])
+                copied_blanks.append(ret[0])
+                processed_idx += 1
+            else:
+                # LCS
+                logging.warning("LCS")
+                aligned_seq = self.LCS(copied_seqs[-1], seqs[processed_idx])
+                copied_seqs.append(aligned_seq)
+                processed_idx += 1
+        if algo == "rover":
+            return copied_seqs[-1]
             
 
         logging.warning(copied_blanks[-1])
-        for _i, _seq in enumerate(copied_seqs):
-            new_seq = []
-            _blank_id = 0
-            for _j, _token in enumerate(_seq):
-                if(_blank_id < len(copied_blanks[-1])):
-                    pass
-                    # logging.warning(f"Dbg: {_j}, {_blank_id}, {copied_blanks[-1][_blank_id]}")
-                if(_blank_id < len(copied_blanks[-1]) and copied_blanks[-1][_blank_id] <= _j):
-                    _blank_id += 1
-                    # append a one hot tensor with pad_idx
-                    new_seq.append(torch.zeros_like(_token))
-                    new_seq[-1][self.real_downstream.model.tokenizer.pad_idx] = 1.
-                new_seq.append(_token)
-            
-            copied_seqs[_i] = torch.stack(new_seq)
-            logging.warning(torch.where(copied_seqs[_i][:, self.real_downstream.model.tokenizer.pad_idx] > blank_prob))
+        if blank_prob >= 0:
+            for _i, _seq in enumerate(copied_seqs):
+                new_seq = []
+                _blank_id = 0
+                for _j, _token in enumerate(_seq):
+                    if(_blank_id < len(copied_blanks[-1])):
+                        pass
+                        # logging.warning(f"Dbg: {_j}, {_blank_id}, {copied_blanks[-1][_blank_id]}")
+                    if(_blank_id < len(copied_blanks[-1]) and copied_blanks[-1][_blank_id] <= _j):
+                        _blank_id += 1
+                        # append a one hot tensor with pad_idx
+                        new_seq.append(torch.zeros_like(_token))
+                        new_seq[-1][self.real_downstream.model.tokenizer.pad_idx] = 1.
+                    new_seq.append(_token)
+                
+                copied_seqs[_i] = torch.stack(new_seq)
+                logging.warning(torch.where(copied_seqs[_i][:, self.real_downstream.model.tokenizer.pad_idx] > blank_prob))
         return copied_seqs
             

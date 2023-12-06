@@ -3301,7 +3301,8 @@ class TransformerSentenceEncoderLayer(nn.Module):
             self.delta_modules = [
                 delta_modules[adapter_name](
                     self, 
-                    re_init=self.adapter_config.adapter.switch.algo.re_init
+                    re_init=self.adapter_config.adapter.switch.algo.re_init,
+                    config=eval(f'self.adapter_config.adapter.{adapter_name}')
                 ) 
                 for adapter_name in self.used_adapter
             ]

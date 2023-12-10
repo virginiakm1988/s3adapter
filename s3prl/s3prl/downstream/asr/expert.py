@@ -228,7 +228,7 @@ class DownstreamExpert(nn.Module):
         features = self.curr_projector(features)
         logits, log_probs_len = self.curr_model(features, features_len)
         log_probs = nn.functional.log_softmax(logits, dim=-1)
-        return log_probs, log_probs_len
+        return log_probs, log_probs_len, logits
 
     def inference(self, features, filenames):
         log_probs, log_probs_len = self._get_log_probs(features)
@@ -292,7 +292,7 @@ class DownstreamExpert(nn.Module):
                 the loss to be optimized, should not be detached
                 a single scalar in torch.FloatTensor
         """
-        log_probs, log_probs_len = self._get_log_probs(features)
+        log_probs, log_probs_len, logits = self._get_log_probs(features)
         device = features[0].device
         labels = [torch.IntTensor(l) for l in labels]
         labels_len = torch.IntTensor([len(label) for label in labels]).to(device=device)
@@ -308,7 +308,8 @@ class DownstreamExpert(nn.Module):
                 log_probs_len,
                 labels_len,
             )
-        records['loss'].append(loss.item())
+        if kwargs.get('record', False):
+            records['loss'].append(loss.item())
 
         target_tokens_batch = []
         target_words_batch = []
@@ -325,12 +326,15 @@ class DownstreamExpert(nn.Module):
 
         with torch.no_grad():
             pred_tokens_batch, pred_words_batch = self._decode(log_probs.float().contiguous().cpu(), log_probs_len)
+        if kwargs.get('record', False):
+            records['target_tokens'] += target_tokens_batch
+            records['target_words'] += target_words_batch
+            records['pred_tokens'] += pred_tokens_batch
+            records['pred_words'] += pred_words_batch
+            records['filenames'] += filenames
 
-        records['target_tokens'] += target_tokens_batch
-        records['target_words'] += target_words_batch
-        records['pred_tokens'] += pred_tokens_batch
-        records['pred_words'] += pred_words_batch
-        records['filenames'] += filenames
+        if kwargs.get('return_predicted', False):
+            return loss, logits
 
         return loss
 
@@ -388,9 +392,22 @@ class DownstreamExpert(nn.Module):
 
             total_loss = loss + average_aux_loss
             logger.add_scalar(
-                f'asr//{key_prefix}-total_loss', total_loss, global_step=global_step
+                f'asr/{key_prefix}-total_loss', total_loss, global_step=global_step
             )
             results.update({f'{key_prefix}-total_loss': total_loss})
+
+            if len(records['grad_norm']):
+                avg_grad_norm = torch.FloatTensor(records['grad_norm']).mean().item()
+                results.update({f'{key_prefix}-grad_norm': avg_grad_norm})
+                logger.add_scalar(
+                    f'asr/{key_prefix}-grad_norm', avg_grad_norm, global_step=global_step
+                )
+            if len(records['kl_loss']):
+                avg_kl_loss = torch.FloatTensor(records['kl_loss']).mean().item()
+                results.update({f'{key_prefix}-kl_loss': avg_kl_loss})
+                logger.add_scalar(
+                    f'asr/{key_prefix}-kl_loss', avg_kl_loss, global_step=global_step
+                )
 
         if 'layers' in kwargs:
             for i, layer in enumerate(kwargs['layers']):

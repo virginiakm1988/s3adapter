@@ -685,7 +685,7 @@ class Runner():
                     global_step = pbar.n * (1 + (self.stage == 1)) + (1 + mode_id) + delta_step * (self.stage == 2)
 
                     if adapterMode == 'train':
-                        curr_bids, last_bid, *others = \
+                        curr_bids, last_bid, grad_norm, kl_loss = \
                             self.train_weight(
                                 data = all_data[adapterMode],
                                 train_split = train_split,
@@ -720,7 +720,8 @@ class Runner():
                     batch_ids += curr_bids
                     batch_id = last_bid
                     if self.adapter_config.adapter.switch.algo.name == 'adamix':
-                        records['grad_norm'] += others
+                        records['grad_norm'].append(grad_norm)
+                        records['kl_loss'].append(kl_loss)
                 # linelogger.info(f'norm_weights: {self.featurizer.model.get_norm_weights}')
                 if self.stage < 2 and self.adapter_config.adapter.switch.tau.type != "const":
                     self.upstream.model.reduce_tau()
@@ -831,7 +832,7 @@ class Runner():
             logger.close()
             wandb.finish()
 
-    def model_forward(self, data: dict, train_split, records, specaug=None, use_last=True, return_predicted=False):
+    def model_forward(self, data: dict, train_split, records, specaug=None, use_last=True, return_predicted=False, record=True):
         # forward data to the whole pipeline
         if self.adapter_config.adapter.switch.algo.name == 's3delta' and not self.adapter_config.adapter.switch.baseline:
             self.upstream.model.compute_shifted_sigmoid(
@@ -854,7 +855,8 @@ class Runner():
             train_split,
             features, *data['others'],
             records = records,
-            return_predicted = return_predicted # If set to True, then Downstream will return output_logits, rather than loss
+            return_predicted = return_predicted, # If set to True, then Downstream will return output_logits, rather than loss
+            record = record
         )
         return output
 
@@ -1076,25 +1078,22 @@ class Runner():
         ):
         try:
             batch_ids = []
+            total_kl_loss = 0
             if self.adapter_config.adapter.switch.algo.use_gumbel and self.stage < 2:
-                    self.upstream.model.sample_gumbel()
+                self.upstream.model.sample_gumbel()
             for i in range(gradient_accumulate_steps):
                 # if self.adapter_config.adapter.switch.algo.name == 'adamix':
                 self.upstream.model.sample_adapter()
-                loss, logits_main = self.model_forward(data[i], train_split, records, specaug, return_predicted=True)
+                loss, logits_main = self.model_forward(data[i], train_split, records, specaug, return_predicted=True, record=True)
                 self.upstream.model.sample_adapter(diff_from_prev=True)
-                _, logits_sub = self.model_forward(data[i], train_split, records, specaug, return_predicted=True)
+                _, logits_sub = self.model_forward(data[i], train_split, records, specaug, return_predicted=True, record=False)
                 batch_id += 1
                 batch_ids.append(batch_id)
-                
-                # Fuck
-                # logits_main = F.softmax(logits_main, dim=-1)
-                # logits_sub = F.softmax(logits_sub, dim=-1)
 
                 kl_loss = F.kl_div(F.log_softmax(logits_main, dim=-1), F.softmax(logits_sub.detach(), dim=-1), reduction='batchmean') \
                         + F.kl_div(F.log_softmax(logits_sub, dim=-1), F.softmax(logits_main.detach(), dim=-1), reduction='batchmean')
-                # exit(0)
                 ((loss + 0.5 * kl_loss) / gradient_accumulate_steps).backward()
+                total_kl_loss += kl_loss.item() / gradient_accumulate_steps
                 del loss, kl_loss
 
                 # Update progress bar
@@ -1126,7 +1125,7 @@ class Runner():
             scheduler.step()
         
         if self.adapter_config.adapter.switch.algo.name == 'adamix':
-            return batch_ids, batch_id, grad_norm
+            return batch_ids, batch_id, grad_norm, total_kl_loss
 
         return batch_ids, batch_id
     
@@ -1272,6 +1271,7 @@ class Runner():
                     features, *others,
                     records = records,
                     batch_id = batch_id,
+                    record = True
                 )
                 batch_ids.append(batch_id)
                 del wavs, features

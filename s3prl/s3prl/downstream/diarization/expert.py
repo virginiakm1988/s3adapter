@@ -327,9 +327,10 @@ class DownstreamExpert(nn.Module):
             SAD_MR, SAD_FR, MI, FA, CF, ACC, DER = 0, 0, 0, 0, 0, 0, 0
         # debug
         # print("SAD_MR {}, SAD_FR {}, MI {}, FA {}, CF {}, ACC {}, DER {}".format(SAD_MR, SAD_FR, MI, FA, CF, ACC, DER))
-        records["loss"].append(loss.item())
-        records["acc"] += [ACC]
-        records["der"] += [DER]
+        if kwargs.get('record', False):
+            records["loss"].append(loss.item())
+            records["acc"] += [ACC]
+            records["der"] += [DER]
 
         if mode == "test" and self.save_predictions:
             predict = predicted.data.cpu().numpy()
@@ -416,6 +417,20 @@ class DownstreamExpert(nn.Module):
             )
             results.update({f'{mode}-total_loss': total_loss})
             print(f'mode {mode} normal_loss {average_loss} aux_loss {average_aux_loss} total_loss {total_loss}')
+
+            if len(records['grad_norm']):
+                avg_grad_norm = torch.FloatTensor(records['grad_norm']).mean().item()
+                results.update({f'{mode}-grad_norm': avg_grad_norm})
+                logger.add_scalar(
+                    f'diarization/{mode}-grad_norm', avg_grad_norm, global_step=global_step
+                )
+
+            if len(records['kl_loss']):
+                avg_kl_loss = torch.FloatTensor(records['kl_loss']).mean().item()
+                results.update({f'{mode}-kl_loss': avg_kl_loss})
+                logger.add_scalar(
+                    f'diarization/{mode}-kl_loss', avg_kl_loss, global_step=global_step
+                )
 
         results.update({f'{mode}-acc': average_acc})
         results.update({f'{mode}-der': average_der})

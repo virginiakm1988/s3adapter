@@ -161,12 +161,12 @@ class DownstreamExpert(nn.Module):
         loss = self.objective(predicted, labels)
 
         predicted_classid = predicted.max(dim=-1).indices
-        records['acc'] += (predicted_classid == labels).view(-1).cpu().float().tolist()
-        records['loss'].append(loss.item())
-
-        records['filename'] += filenames
-        records['predict_speaker'] += SpeakerClassifiDataset.label2speaker(predicted_classid.cpu().tolist())
-        records['truth_speaker'] += SpeakerClassifiDataset.label2speaker(labels.cpu().tolist())
+        if kwargs.get('record', False):
+            records['acc'] += (predicted_classid == labels).view(-1).cpu().float().tolist()
+            records["loss"].append(loss.item())
+            records['filename'] += filenames
+            records['predict_speaker'] += SpeakerClassifiDataset.label2speaker(predicted_classid.cpu().tolist())
+            records['truth_speaker'] += SpeakerClassifiDataset.label2speaker(labels.cpu().tolist())
         if kwargs.get('return_predicted', False):
             return loss, predicted
         return loss
@@ -210,9 +210,17 @@ class DownstreamExpert(nn.Module):
             results.update({f'{mode}-total_loss': total_loss})
 
             if len(records['grad_norm']):
-                results.update({f'{mode}-grad_norm': torch.FloatTensor(records['grad_norm']).mean().item()})
+                avg_grad_norm = torch.FloatTensor(records['grad_norm']).mean().item()
+                results.update({f'{mode}-grad_norm': avg_grad_norm})
                 logger.add_scalar(
-                    f'voxceleb1/{mode}-grad_norm', total_loss, global_step=global_step
+                    f'voxceleb1/{mode}-grad_norm', avg_grad_norm, global_step=global_step
+                )
+
+            if len(records['kl_loss']):
+                avg_kl_loss = torch.FloatTensor(records['kl_loss']).mean().item()
+                results.update({f'{mode}-kl_loss': avg_kl_loss})
+                logger.add_scalar(
+                    f'voxceleb1/{mode}-kl_loss', avg_kl_loss, global_step=global_step
                 )
 
         if 'layers' in kwargs:

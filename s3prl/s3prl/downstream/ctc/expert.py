@@ -123,7 +123,9 @@ class DownstreamExpert(nn.Module):
             log_probs_len,
             labels_len,
         )
-        records["loss"].append(loss.item())
+
+        if kwargs.get('record', False):
+            records["loss"].append(loss.item())
 
         pred_tokens = log_probs.argmax(dim=-1)
         filtered_consecutive = []
@@ -136,7 +138,8 @@ class DownstreamExpert(nn.Module):
         hyp_consecutive = [
             self.tokenizer.decode(h) for h in filtered_consecutive
         ]
-        records["hyp_consecutive"] += hyp_consecutive
+        if kwargs.get('record', False):
+            records["hyp_consecutive"] += hyp_consecutive
             
         filtered_tokens = []
         for pred_token in pred_tokens:
@@ -153,9 +156,13 @@ class DownstreamExpert(nn.Module):
         groundtruth = [self.tokenizer.decode(g.tolist()) for g in labels]
 
         # store all text in a batch
-        records["hypothesis"] += hypothesis
-        records["groundtruth"] += groundtruth
-        records["filename"] += filenames
+        if kwargs.get('record', False):
+            records["hypothesis"] += hypothesis
+            records["groundtruth"] += groundtruth
+            records["filename"] += filenames
+
+        if kwargs.get('return_predicted', False):
+            return loss, logits
 
         return loss
 
@@ -186,6 +193,19 @@ class DownstreamExpert(nn.Module):
                 f'{self._get_task_name()}/{key_prefix}-total_loss', total_loss, global_step=global_step
             )
             results.update({f'{key_prefix}-total_loss': total_loss})
+
+            if len(records['grad_norm']):
+                avg_grad_norm = torch.FloatTensor(records['grad_norm']).mean().item()
+                results.update({f'{key_prefix}-grad_norm': avg_grad_norm})
+                logger.add_scalar(
+                    f'{self._get_task_name()}/{key_prefix}-grad_norm', avg_grad_norm, global_step=global_step
+                )
+            if len(records['kl_loss']):
+                avg_kl_loss = torch.FloatTensor(records['kl_loss']).mean().item()
+                results.update({f'{key_prefix}-kl_loss': avg_kl_loss})
+                logger.add_scalar(
+                    f'{self._get_task_name()}/{key_prefix}-kl_loss', avg_kl_loss, global_step=global_step
+                )
         
         if 'layers' in kwargs:
             for i, layer in enumerate(kwargs['layers']):

@@ -3261,7 +3261,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
 
         # layer norm associated with the position wise feed-forward NN
         self.final_layer_norm = LayerNorm(self.embedding_dim)
-        
+        self.layer_idx = layer_idx
         # adapter configs...      
         self.adapter_config = adapter_config
         if adapter_config:

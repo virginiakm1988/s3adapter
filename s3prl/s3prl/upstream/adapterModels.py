@@ -1016,6 +1016,12 @@ class SAdapter(nn.Module):
         need_weights = kwargs['need_weights']
         att_args = kwargs['att_args']
         layer_norm_first = kwargs['layer_norm_first']
+
+        if kwargs.get('up_idx', False):
+            self.adapter['up_proj'] = self.all_adapter[kwargs['up_idx']][2]
+        if kwargs.get('down_idx', False):
+            self.adapter['down_proj'] = self.all_adapter[kwargs['down_idx']][0]
+        # print(f"layer: {parent.layer_idx}, up: {kwargs['up_idx']}, down: {kwargs['down_idx']}")
         if layer_norm_first:
             x = parent.self_attn_layer_norm(x)
 

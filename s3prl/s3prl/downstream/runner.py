@@ -192,8 +192,9 @@ class Runner():
             if 'optimizer' in name:
                 model.load_state_dict(init_weight[name])
             else:
+                new_dict = {name: val for name, val in init_weight.items() if 'virtual' not in name}
                 model_dict = model.state_dict()
-                model_dict.update(init_weight)
+                model_dict.update(new_dict)
                 model.load_state_dict(model_dict)
         
         if name == "Upstream":

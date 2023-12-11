@@ -1089,6 +1089,10 @@ class Runner():
                 _, logits_sub = self.model_forward(data[i], train_split, records, specaug, return_predicted=True, record=False)
                 batch_id += 1
                 batch_ids.append(batch_id)
+                
+                if len(logits_main.shape) == 3:
+                    logits_main = logits_main.view(-1, logits_main.shape[-1])
+                    logits_sub = logits_main.view(-1, logits_sub.shape[-1])
 
                 kl_loss = F.kl_div(F.log_softmax(logits_main, dim=-1), F.softmax(logits_sub.detach(), dim=-1), reduction='batchmean') \
                         + F.kl_div(F.log_softmax(logits_sub, dim=-1), F.softmax(logits_main.detach(), dim=-1), reduction='batchmean')

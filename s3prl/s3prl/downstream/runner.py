@@ -1078,7 +1078,7 @@ class Runner():
         ):
         try:
             batch_ids = []
-            total_kl_loss = 0
+            total_kl_loss = 0.0
             if self.adapter_config.adapter.switch.algo.use_gumbel and self.stage < 2:
                 self.upstream.model.sample_gumbel()
             for i in range(gradient_accumulate_steps):

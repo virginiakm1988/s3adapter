@@ -1094,8 +1094,9 @@ class Runner():
                     logits_main = logits_main.view(-1, logits_main.shape[-1])
                     logits_sub = logits_main.view(-1, logits_sub.shape[-1])
 
-                kl_loss = F.kl_div(F.log_softmax(logits_main, dim=-1), F.softmax(logits_sub.detach(), dim=-1), reduction='batchmean') \
-                        + F.kl_div(F.log_softmax(logits_sub, dim=-1), F.softmax(logits_main.detach(), dim=-1), reduction='batchmean')
+                kl_loss = F.kl_div(F.log_softmax(logits_main, dim=-1), F.log_softmax(logits_sub.detach(), dim=-1), log_target=True, reduction='batchmean') \
+                        + F.kl_div(F.log_softmax(logits_sub, dim=-1), F.log_softmax(logits_main.detach(), dim=-1), log_target=True, reduction='batchmean')
+
                 ((loss + 0.5 * kl_loss) / gradient_accumulate_steps).backward()
                 total_kl_loss += kl_loss.item() / gradient_accumulate_steps
                 del loss, kl_loss

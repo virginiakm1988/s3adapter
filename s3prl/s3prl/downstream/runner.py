@@ -1092,7 +1092,7 @@ class Runner():
                 
                 if len(logits_main.shape) == 3:
                     logits_main = logits_main.view(-1, logits_main.shape[-1])
-                    logits_sub = logits_main.view(-1, logits_sub.shape[-1])
+                    logits_sub = logits_sub.view(-1, logits_sub.shape[-1])
 
                 kl_loss = F.kl_div(F.log_softmax(logits_main, dim=-1), F.log_softmax(logits_sub.detach(), dim=-1), log_target=True, reduction='batchmean') \
                         + F.kl_div(F.log_softmax(logits_sub, dim=-1), F.log_softmax(logits_main.detach(), dim=-1), log_target=True, reduction='batchmean')

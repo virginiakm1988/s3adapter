@@ -43,7 +43,10 @@ FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
 linelogger.setLevel(logging.INFO)
 from s3prl.upstream.adapterModels import dict2obj, MyLogger, is_baseline, find_module
-from typing import List
+from typing import List, Dict
+import functools
+import ray
+import itertools
 # from darts
 # linelogger = MyLogger(linelogger)
 
@@ -523,8 +526,28 @@ class EnsembleRunner():
         # records = defaultdict(list)
         records = defaultdict(lambda: defaultdict(list))
         torch.set_num_threads(32)
-        self.parallel_monkey(dataloader, split, evaluate_steps, records, batch_ids)
+        # results = self.parallel_monkey(dataloader, split, evaluate_steps, records, batch_ids)
+        dtwDs = DtwDataset(dataloader, self.upstreams, self.downstreams, self.featurizers, self.real_downstream, split, records, self.args)
+        dtwLoader = torch.utils.data.DataLoader(dtwDs, batch_size=1, shuffle=False, num_workers=16, collate_fn=lambda x: x, pin_memory=True)
         logging.warning("Monkey...")
+        for batch_id, _batch_object in enumerate(dtwLoader):
+            logging.warning(f"batch_obj: {_batch_object}")
+            seqs_ = torch.stack([_b["seq"] for _b in _batch_object], dim=0)
+            wavs_ = [_b["wav"] for _b in _batch_object]
+            others_ = [_b["other"] for _b in _batch_object]  # (batch, 2)
+        
+            wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs_]
+            with torch.no_grad():
+                features = self.upstreams[-1].model(wavs)
+                features = self.featurizers[-1].model(wavs, features)
+                self.real_downstream.model(
+                    split,
+                    features, *zip(*others_),
+                    records = records["real"],
+                    batch_id = batch_id,
+                    log_probs = seqs_
+            )   
+        
         '''
         for batch_id, (wavs, *others) in enumerate(tqdm(dataloader, dynamic_ncols=True, desc=split, total=evaluate_steps)):
             if batch_id > evaluate_steps:
@@ -584,6 +607,7 @@ class EnsembleRunner():
                 )
                 \'''
                 
+        # \'''
         '''
         # logging
         for _exp_dir, _record in records.items(): 
@@ -629,18 +653,75 @@ class EnsembleRunner():
         return [] if type(save_names) is not list else save_names
     
     # @torch.jit.script
-    def single_merge(self, all_log_probs: torch.Tensor, ens_algo: str="dtw") -> List[List[torch.Tensor]]:
+ 
+        # '''
+    
+        # waited_futures = []
+        # for _fut in futures_:
+            # waited_futures.extend(torch.jit.wait(_fut))
+            
+        for _idx, merged_seqs in enumerate(waited_futures):
+            if ens_algo == "dtw":
+                self.real_downstream.model(
+                    split,
+                    features, *others,
+                    records = records["real"],
+                    batch_id = batch_id,
+                    log_probs = torch.stack(merged_seqs).mean(dim=0).unsqueeze(0)
+                )
+            else:
+                num_classes = all_log_probs.shape[-1]
+                self.real_downstream.model(
+                    split,
+                    features, *others,
+                    records = records["real"],
+                    batch_id = batch_id,
+                    log_probs = torch.nn.functional.one_hot(merged_seqs, num_classes).unsqueeze(0).float()
+                )
+              
+              
+    @ray.remote  
+    def single_merge(self, batch_object, split, records: Dict, ens_algo: str="dtw") -> List[List[torch.Tensor]]:
+        batch_id, (wavs, *others) = batch_object
+        wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
+        all_log_probs: List[torch.Tensor] = []
+        logging.warning("Start merging")
+        with torch.no_grad():
+            for upstream, featurizer, downstream, ens_ckpt in zip(self.upstreams, self.featurizers, self.downstreams, self.args.ensemble):
+                features = upstream.model(wavs)
+                features = featurizer.model(wavs, features)
+                exp_name = os.path.dirname(ens_ckpt)
+                log_probs = downstream.model(
+                    split,
+                    features, *others,
+                    records = records[exp_name],
+                    batch_id = batch_id,
+                    return_log_probs = True
+                )
+                # logging.warning(records[exp_name].keys())
+                all_log_probs.append(log_probs)
+            # '''
+            all_log_probs: torch.Tensor = torch.stack(all_log_probs, dim=0)  # 3 * N * T * C
+                
         all_merged_seqs = []
         for _idx, _seqs in enumerate(zip(*all_log_probs)):
-            merged_seqs = self.merge_all(list(_seqs), algo=ens_algo)  # 3 * T * C
+            merged_seqs = iso_merge_all(list(_seqs), algo=ens_algo)  # 3 * T * C
             all_merged_seqs.append(merged_seqs)
             # all_log_probs[:, _idx, :, :] = torch.stack(merged_seqs, dim=0)
         
         return all_merged_seqs
-        # '''
-    
+     
+                
     # @torch.jit.script
     def parallel_monkey(self, dataloader, split, evaluate_steps, records, batch_ids: List[int]):
+        ctx = torch.multiprocessing.get_context('spawn')
+        # with ctx.Pool(16) as pool:
+        #     results = pool.map(functools.partial(self.single_merge, split=split, records=records), enumerate(dataloader))
+        results = [self.single_merge.remote(self, batch_object, split, records) for batch_object in enumerate(dataloader)]
+        return ray.get(results)
+        with torch.multiprocessing.Pool(16) as pool:
+            results = pool.starmap(functools.partial(self.single_merge, split=split, records=records), (enumerate(dataloader,)))
+        return results
         futures_ = []
         for batch_id, (wavs, *others) in enumerate(dataloader):
             if batch_id > evaluate_steps:
@@ -671,31 +752,9 @@ class EnsembleRunner():
                 # batch_ids.append(batch_id)
         
         torch.jit.wait(fut)
-        # waited_futures = []
-        # for _fut in futures_:
-            # waited_futures.extend(torch.jit.wait(_fut))
-            
-        for _idx, merged_seqs in enumerate(waited_futures):
-            if ens_algo == "dtw":
-                self.real_downstream.model(
-                    split,
-                    features, *others,
-                    records = records["real"],
-                    batch_id = batch_id,
-                    log_probs = torch.stack(merged_seqs).mean(dim=0).unsqueeze(0)
-                )
-            else:
-                num_classes = all_log_probs.shape[-1]
-                self.real_downstream.model(
-                    split,
-                    features, *others,
-                    records = records["real"],
-                    batch_id = batch_id,
-                    log_probs = torch.nn.functional.one_hot(merged_seqs, num_classes).unsqueeze(0).float()
-                )
-                
+
     
-    def compare_sequence(self, s1, s2, blank1=None, blank2=None, use_monkey=False):
+    def compare_sequence(self, s1, s2, blank1=None, blank2=None, use_monkey=True):
         # T * C
         s1 = s1.detach().cpu().numpy()
         s2 = s2.detach().cpu().numpy()
@@ -739,7 +798,7 @@ class EnsembleRunner():
             _dtw = SoftDTW(use_cuda=True)
             _res = _dtw(torch.from_numpy(s1).unsqueeze(0), torch.from_numpy(s2).unsqueeze(0))[0, :-1, :-1]
             ret1, ret2 = [], []
-            nx, ny = t1 - 1, t2 - 1
+            nx, ny = t1, t2
             while(nx > 0 or ny > 0):
                 ret1.append(nx)
                 ret2.append(ny)
@@ -747,8 +806,8 @@ class EnsembleRunner():
                 _max_dis = torch.inf
                 for di, dj in [(-1, 0), (-1, -1), (0, -1)]:
                     fx, fy = nx + di, ny + dj
-                    if _res[fx, fy] + torch.norm(s1[i] - s2[j], p=2) < _max_dis:
-                        _max_dis = _res[fx, fy] + torch.norm(s1[i] - s2[j], p=2)
+                    if _res[fx, fy] + torch.norm(s1[nx - 1] - s2[ny - 1], p=2) < _max_dis:
+                        _max_dis = _res[fx, fy] + torch.norm(s1[nx - 1] - s2[ny - 1], p=2)
                         _frx, _fry = fx, fy
                         
                 # print(f"lattice: {nx}, {ny}, {fx}, {fy}")
@@ -794,8 +853,8 @@ class EnsembleRunner():
         logging.warning(f"{new_blank2}")
         return (s1[ret1] + s2[ret2]) / 2, ret1, ret2, dp[-1][-1], new_blank1, new_blank2
 
-
-    def parse_blank_pos(self, blank):
+    @staticmethod
+    def parse_blank_pos(blank):
         new_blank = []
         cnt_ = 0
         for _i, e in enumerate(blank):
@@ -807,8 +866,8 @@ class EnsembleRunner():
 
         return new_blank
 
-
-    def to_onehot(self, seq):
+    @staticmethod
+    def to_onehot(seq):
         # seq: [T * C] -> T * C, C is the number of classes
         # [0.2, 0.3, 0.5] -> [0, 0, 1]
         # use torch scatter
@@ -859,7 +918,7 @@ class EnsembleRunner():
                 # filter idx that blank prob > 0.97
                 high_prob_blank_idx = (soft_seq[:, self.real_downstream.model.tokenizer.pad_idx] < blank_prob)
                 logging.warning(f"{torch.sum(~high_prob_blank_idx)}")
-                blanks[_sid] = self.parse_blank_pos(high_prob_blank_idx)
+                blanks[_sid] = EnsembleRunner.parse_blank_pos(high_prob_blank_idx)
                 logging.warning(f"{blanks[_sid]}")
                 seqs[_sid] = soft_seq[high_prob_blank_idx]
             else:
@@ -1331,12 +1390,230 @@ def profile(batch_size, seq_len_a, seq_len_b, dims, tol_backward):
     print("  Speedup: ", avg_cpu / avg_gpu)
     print()
 
-# ----------------------------------------------------------------------------------------------------------------------
-if __name__ == "__main__":
-    from timeit import default_timer as timer
 
-    torch.manual_seed(1234)
 
-    profile(128, 17, 15, 2, tol_backward=1e-6)
-    profile(512, 64, 64, 2, tol_backward=1e-4)
-    profile(512, 256, 256, 2, tol_backward=1e-3)
+
+class DtwDataset(torch.utils.data.Dataset):
+    def __init__(self, loader, upstreams, downstreams, featureizers, real_downstream, split, records, args):
+        self.args = args
+        self.loader = loader
+        self.upstreams = upstreams
+        self.downstreams = downstreams
+        self.featurizers = featureizers
+        self.real_downstream = real_downstream
+        self.split = split
+        self.ens_algo = "dtw"
+        self.batch_ids = []
+        self.wavs = []
+        self.others = []
+        self.records = records
+        self.stacked_log_probs = []
+        for batch_id, (wavs, *others) in enumerate(loader):
+            logging.warning(f"others: {(others)}, {len(others[0][0])}, {len(others[1][0])}")
+            self.batch_ids.append(batch_id)
+            self.wavs.extend(wavs)
+            self.others.append(others)
+            wavs = [torch.FloatTensor(wav).to(self.args.device) for wav in wavs]
+            all_log_probs = []
+            with torch.no_grad():
+                for upstream, featurizer, downstream, ens_ckpt in zip(self.upstreams, self.featurizers, self.downstreams, self.args.ensemble):
+                    features = upstream.model(wavs)
+                    features = featurizer.model(wavs, features)
+                    exp_name = os.path.dirname(ens_ckpt)
+                    log_probs = downstream.model(
+                        split,
+                        features, *others,
+                        records = records[exp_name],
+                        batch_id = batch_id,
+                        return_log_probs = True
+                    )
+                    # logging.warning(records[exp_name].keys())
+                    all_log_probs.append(log_probs)
+                # \'''
+                all_log_probs = torch.stack(all_log_probs, dim=0)  # 3 * N * T * C
+                self.stacked_log_probs.extend(all_log_probs.transpose(0, 1).cpu())
+        # [(2*b), (2*b)] -> [2 * B]
+        self.others = list(zip(*self.others))
+        # [(b,b,b,b), (b,b,b,b)]
+        self.others = [list(itertools.chain.from_iterable(_other)) for _other in self.others]
+        # self.others = [np.concatenate(_other) for _other in self.others]
+        logging.warning(f"Len: {len(self.stacked_log_probs)} | {len(self.wavs)} | {len(self.others)}")
+
+    @staticmethod
+    def merge_all(seqs, blank_prob=-1, algo=" ", pad_idx=-1) -> List[torch.Tensor]:
+        processed_idx = 1
+        blanks = [[] for _ in range(len(seqs))]
+        for _sid, _seq in enumerate(seqs):
+            soft_seq = torch.nn.functional.softmax(_seq, dim=-1)
+            log_seq = torch.nn.functional.log_softmax(_seq, dim=-1)
+            if algo == "rover":
+                soft_seq = torch.argmax(soft_seq, dim=-1)
+            if blank_prob >= 0:
+                black_probs = soft_seq[:, pad_idx]
+                logging.warning(f"{torch.sort(black_probs, descending=True)[0][:10]}")
+                # filter idx that blank prob > 0.97
+                high_prob_blank_idx = (soft_seq[:, pad_idx] < blank_prob)
+                logging.warning(f"{torch.sum(~high_prob_blank_idx)}")
+                blanks[_sid] = EnsembleRunner.parse_blank_pos(high_prob_blank_idx)
+                logging.warning(f"{blanks[_sid]}")
+                seqs[_sid] = soft_seq[high_prob_blank_idx]
+            else:
+                seqs[_sid] = soft_seq
+        copied_seqs = [seqs[0]]
+        copied_blanks = [blanks[0]]
+        while ((processed_idx) < len(seqs)):
+            logging.warn(f"processing {processed_idx}")
+            if algo == "dtw":
+                aligned_seq, aln1, aln2, score, *ret = DtwDataset.compare_sequence(copied_seqs[-1], seqs[processed_idx], copied_blanks[-1], blanks[processed_idx])
+                for i, _seq in enumerate(copied_seqs):
+                    copied_seqs[i] = _seq[aln1]
+                    copied_blanks[i] = ret[0]
+                copied_seqs.append(seqs[processed_idx][aln2])
+                copied_blanks.append(ret[0])
+                processed_idx += 1
+            else:
+                # LCS
+                logging.warning("LCS")
+                aligned_seq = DtwDataset.LCS(copied_seqs[-1], seqs[processed_idx])
+                copied_seqs.append(aligned_seq)
+                processed_idx += 1
+        if algo == "rover":
+            return copied_seqs[-1]
+            
+
+        logging.warning(copied_blanks[-1])
+        if blank_prob >= 0:
+            for _i, _seq in enumerate(copied_seqs):
+                new_seq = []
+                _blank_id = 0
+                for _j, _token in enumerate(_seq):
+                    if(_blank_id < len(copied_blanks[-1])):
+                        pass
+                        # logging.warning(f"Dbg: {_j}, {_blank_id}, {copied_blanks[-1][_blank_id]}")
+                    if(_blank_id < len(copied_blanks[-1]) and copied_blanks[-1][_blank_id] <= _j):
+                        _blank_id += 1
+                        # append a one hot tensor with pad_idx
+                        new_seq.append(torch.zeros_like(_token))
+                        new_seq[-1][pad_idx] = 1.
+                    new_seq.append(_token)
+                
+                copied_seqs[_i] = torch.stack(new_seq)
+                logging.warning(torch.where(copied_seqs[_i][:, pad_idx] > blank_prob))
+        return copied_seqs
+    
+    @staticmethod
+    def compare_sequence(s1, s2, blank1=None, blank2=None, use_monkey=True):
+        # T * C
+        s1 = s1.detach().cpu().numpy()
+        s2 = s2.detach().cpu().numpy()
+        t1, t2 = s1.shape[0], s2.shape[0]
+        dp = np.zeros([t1, t2]) + np.inf
+        frm = [[(-1, -1) for j in range(t2)] for i in range(t1)]
+        dp[0][0] = np.linalg.norm(s1[0] - s2[0], ord=2)
+        logging.warning(f"{s1.shape}, {s2.shape}")
+        if use_monkey:
+            for i in range(t1):
+                for j in range(t2):
+                    if not j and not i:
+                        continue
+                    if not j:
+                        dp[i][j] = dp[i - 1][j] + np.linalg.norm(s1[i] - s2[j], ord=2)
+                        frm[i][j] = (i - 1, j)
+                    elif not i:
+                        dp[i][j] = dp[i][j - 1] + np.linalg.norm(s1[i] - s2[j], ord=2)
+                        frm[i][j] = (i, j - 1)
+                    else:
+                        for di, dj in [(-1, 0), (-1, -1), (0, -1)]:
+                            nx, ny = i + di, j + dj
+                            if abs(i - j) < 2:
+                                pass
+                                # logging.warning(f"({nx}, {ny}) : {dp[nx][ny] + np.linalg.norm(s1[i] - s2[j], ord=2):.5f}")
+                            if dp[nx][ny] + np.linalg.norm(s1[i] - s2[j], ord=2) < dp[i][j]:
+                                frm[i][j] = (nx, ny)
+                                dp[i][j] = dp[nx][ny] + np.linalg.norm(s1[i] - s2[j], ord=2)
+            
+            ret1, ret2 = [], []
+            nx, ny = t1 - 1, t2 - 1
+            while(nx > 0 or ny > 0):
+                ret1.append(nx)
+                ret2.append(ny)
+                fx, fy = frm[nx][ny]
+                # print(f"lattice: {nx}, {ny}, {fx}, {fy}")
+                nx, ny = fx, fy
+            ret1.append(0)
+            ret2.append(0)
+        else:
+            _dtw = SoftDTW(use_cuda=True)
+            _res = _dtw(torch.from_numpy(s1).unsqueeze(0), torch.from_numpy(s2).unsqueeze(0))[0, :-1, :-1]
+            ret1, ret2 = [], []
+            nx, ny = t1, t2
+            while(nx > 0 or ny > 0):
+                ret1.append(nx)
+                ret2.append(ny)
+                _frx, _fry = nx, ny
+                _max_dis = torch.inf
+                for di, dj in [(-1, 0), (-1, -1), (0, -1)]:
+                    fx, fy = nx + di, ny + dj
+                    if _res[fx, fy] + torch.norm(s1[nx - 1] - s2[ny - 1], p=2) < _max_dis:
+                        _max_dis = _res[fx, fy] + torch.norm(s1[nx - 1] - s2[ny - 1], p=2)
+                        _frx, _fry = fx, fy
+                        
+                # print(f"lattice: {nx}, {ny}, {fx}, {fy}")
+                nx, ny = _frx, _fry
+            ret1.append(0)
+            ret2.append(0)
+        # logging.info(ret2)
+        
+        logging.warning(f"{len(ret1)}, {len(ret2)}")
+        ret1 = torch.tensor(ret1[::-1])
+        ret2 = torch.tensor(ret2[::-1])
+        logging.warning(ret1)
+        logging.warning(ret2)
+        new_blank1, new_blank2 = [], []
+        if blank1 and blank2:
+            max_id = -1
+            blank_id = 0
+            for _i, e in enumerate(ret1):
+                if blank_id >= len(blank1):
+                    break
+                if e > max_id:
+                    if e == blank1[blank_id]:
+                        new_blank1.append(_i)
+                        blank_id += 1
+                    max_id = e
+            
+            max_id = -1
+            blank_id = 0
+            for _i, e in enumerate(ret2):
+                if blank_id >= len(blank2):
+                    break
+                if e > max_id:
+                    if e == blank2[blank_id]:
+                        new_blank2.append(_i)
+                        blank_id += 1
+                    max_id = e
+            
+            new_blank1 = sorted(list(set(new_blank1)))
+            new_blank2 = sorted(list(set(new_blank2)))
+            new_blank1 = torch.tensor(new_blank1)
+            new_blank2 = torch.tensor(new_blank2)
+        logging.warning(f"{new_blank1}")
+        logging.warning(f"{new_blank2}")
+        return (s1[ret1] + s2[ret2]) / 2, ret1, ret2, dp[-1][-1], new_blank1, new_blank2
+
+
+    def __getitem__(self, index):
+        all_log_probs: List[torch.Tensor] = []
+        logging.warning("Start merging")
+        with torch.no_grad():
+            all_log_probs: torch.Tensor = self.stacked_log_probs[index]  # 3 * N * T * C
+            
+            merged_seqs = DtwDataset.merge_all(list(all_log_probs), algo=self.ens_algo)  # 3 * T * C
+                # all_log_probs[:, _idx, :, :] = torch.stack(merged_seqs, dim=0)
+            return {"seq": torch.stack(merged_seqs).mean(dim=0), "wav": self.wavs[index], "other": [_other[index] for _other in self.others]}
+        
+        
+    def __len__(self):
+        return len(self.wavs)        
+
+

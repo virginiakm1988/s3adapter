@@ -46,6 +46,7 @@ from s3prl.upstream.adapterModels import dict2obj, MyLogger, is_baseline, find_m
 from typing import List, Dict
 import functools
 import ray
+import scipy
 import itertools
 # from darts
 # linelogger = MyLogger(linelogger)
@@ -545,7 +546,7 @@ class EnsembleRunner():
                     features, *zip(*others_),
                     records = records["real"],
                     batch_id = batch_id,
-                    log_probs = seqs_
+                    log_probs = seqs_.to(self.args.device)
             )   
         
         '''
@@ -1402,14 +1403,14 @@ class DtwDataset(torch.utils.data.Dataset):
         self.featurizers = featureizers
         self.real_downstream = real_downstream
         self.split = split
-        self.ens_algo = "dtw"
+        self.ens_algo = "vote"
         self.batch_ids = []
         self.wavs = []
         self.others = []
         self.records = records
         self.stacked_log_probs = []
         for batch_id, (wavs, *others) in enumerate(loader):
-            logging.warning(f"others: {(others)}, {len(others[0][0])}, {len(others[1][0])}")
+            # logging.warning(f"others: {(others)}, {len(others[0][0])}, {len(others[1][0])}")
             self.batch_ids.append(batch_id)
             self.wavs.extend(wavs)
             self.others.append(others)
@@ -1608,8 +1609,17 @@ class DtwDataset(torch.utils.data.Dataset):
         with torch.no_grad():
             all_log_probs: torch.Tensor = self.stacked_log_probs[index]  # 3 * N * T * C
             
-            merged_seqs = DtwDataset.merge_all(list(all_log_probs), algo=self.ens_algo)  # 3 * T * C
-                # all_log_probs[:, _idx, :, :] = torch.stack(merged_seqs, dim=0)
+            if self.ens_algo == "dtw":
+                merged_seqs = DtwDataset.merge_all(list(all_log_probs), algo=self.ens_algo)  # 3 * T * C
+            elif self.ens_algo == "avg":
+                merged_seqs = [_prob for _prob in all_log_probs]
+            elif self.ens_algo == "vote":
+                voter = (all_log_probs) # 3 * T * C
+                num_classes = voter.shape[-1]
+                voted = scipy.stats.mode(voter.argmax(-1), axis=0, keepdims=False)[0] # T
+                one_hot = torch.nn.functional.one_hot(torch.LongTensor(voted), num_classes=num_classes).float() # T * C
+                merged_seqs = [one_hot for _ in range(len(all_log_probs))]
+            # all_log_probs[:, _idx, :, :] = torch.stack(merged_seqs, dim=0)
             return {"seq": torch.stack(merged_seqs).mean(dim=0), "wav": self.wavs[index], "other": [_other[index] for _other in self.others]}
         
         

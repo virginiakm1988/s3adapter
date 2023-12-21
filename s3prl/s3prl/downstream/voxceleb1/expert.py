@@ -156,7 +156,12 @@ class DownstreamExpert(nn.Module):
         features = pad_sequence(features, batch_first=True)
         features = self.curr_projector(features)
         predicted, _ = self.curr_model(features, features_len)
+        if kwargs.get("return_log_probs", False):
+            # [batch_size, num_speakers]
+            return predicted
 
+        if kwargs.get("log_probs", None) is not None:
+            predicted = kwargs["log_probs"]
         labels = torch.LongTensor(labels).to(features.device)
         loss = self.objective(predicted, labels)
 

@@ -1545,9 +1545,9 @@ class DtwDataset(torch.utils.data.Dataset):
             ret2.append(0)
         else:
             _dtw = SoftDTW(use_cuda=True)
-            _res = _dtw(torch.from_numpy(s1).unsqueeze(0), torch.from_numpy(s2).unsqueeze(0))[0, :-1, :-1]
+            _res = _dtw(torch.from_numpy(s1).unsqueeze(0), torch.from_numpy(s2).unsqueeze(0))[0, 1:-1, 1:-1]
             ret1, ret2 = [], []
-            nx, ny = t1, t2
+            nx, ny = t1 - 1, t2 - 1
             while(nx > 0 or ny > 0):
                 ret1.append(nx)
                 ret2.append(ny)
@@ -1555,8 +1555,8 @@ class DtwDataset(torch.utils.data.Dataset):
                 _max_dis = torch.inf
                 for di, dj in [(-1, 0), (-1, -1), (0, -1)]:
                     fx, fy = nx + di, ny + dj
-                    if _res[fx, fy] + torch.norm(s1[nx - 1] - s2[ny - 1], p=2) < _max_dis:
-                        _max_dis = _res[fx, fy] + torch.norm(s1[nx - 1] - s2[ny - 1], p=2)
+                    if _res[fx, fy] + torch.norm(s1[nx] - s2[ny], p=2) < _max_dis:
+                        _max_dis = _res[fx, fy] + torch.norm(s1[nx] - s2[ny], p=2)
                         _frx, _fry = fx, fy
                         
                 # print(f"lattice: {nx}, {ny}, {fx}, {fy}")
@@ -1617,7 +1617,14 @@ class DtwDataset(torch.utils.data.Dataset):
                 voter = (all_log_probs) # 3 * T * C
                 num_classes = voter.shape[-1]
                 voted = scipy.stats.mode(voter.argmax(-1), axis=0, keepdims=False)[0] # T
-                one_hot = torch.nn.functional.one_hot(torch.LongTensor(voted), num_classes=num_classes).float() # T * C
+                assert (voted < num_classes), f"voted: {voted}, num_classes: {num_classes}"
+                try: 
+                    
+                    logging.warning(f"Votes: {voter.argmax(-1)}")
+                    one_hot = torch.nn.functional.one_hot(torch.LongTensor(voted), num_classes=num_classes).float() # T * C
+                except:
+                    logging.warning(f"voted: {voted}, num_classes: {num_classes}")
+                    raise
                 merged_seqs = [one_hot for _ in range(len(all_log_probs))]
             # all_log_probs[:, _idx, :, :] = torch.stack(merged_seqs, dim=0)
             return {"seq": torch.stack(merged_seqs).mean(dim=0), "wav": self.wavs[index], "other": [_other[index] for _other in self.others]}

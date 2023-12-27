@@ -148,6 +148,10 @@ class DownstreamExpert(nn.Module):
         predicted, _ = self.curr_model(features, features_len)
 
         labels = torch.LongTensor(labels).to(features.device)
+        if "return_log_probs" in kwargs:
+            return predicted
+        if "log_probs" in kwargs:
+            predicted = kwargs["log_probs"]
         loss = self.objective(predicted, labels)
 
         predicted_classid = predicted.max(dim=-1).indices

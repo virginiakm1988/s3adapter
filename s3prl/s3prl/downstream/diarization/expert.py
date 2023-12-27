@@ -284,7 +284,7 @@ class DownstreamExpert(nn.Module):
         """
         labels = [torch.from_numpy(label) for label in labels]
         lengths = torch.LongTensor(lengths)
-
+        # logging.warning(f"ID: {rec_id}, lengths: {lengths}")
         features = pad_sequence(features, batch_first=True)
         labels = pad_sequence(labels, batch_first=True, padding_value=0).to(
             features.device
@@ -294,7 +294,13 @@ class DownstreamExpert(nn.Module):
 
         if 'return_predicted' in kwargs and kwargs['return_predicted']:
             return predicted
-
+        if kwargs.get("return_log_probs", False):
+            # [batch_size, num_speakers]
+            return predicted
+        if kwargs.get("log_probs", None) is not None:
+            predicted = kwargs["log_probs"]
+        if isinstance(rec_id, tuple):
+            rec_id = rec_id[0]
         # cause logits are in (batch, seq, class) and labels are in (batch, seq)
         # nn.CrossEntropyLoss expect to have (N, class) and (N,) as input
         # here we flatten logits and labels in order to apply nn.CrossEntropyLoss

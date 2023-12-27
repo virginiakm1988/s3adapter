@@ -43,7 +43,7 @@ FORMAT = "[%(filename)s:%(lineno)s - %(funcName)20s() ] %(message)s"
 logging.basicConfig(format=FORMAT)
 linelogger.setLevel(logging.INFO)
 from s3prl.upstream.adapterModels import dict2obj, MyLogger, is_baseline, find_module
-from typing import List, Dict
+from typing import List, Dict, Any
 import functools
 import ray
 import scipy
@@ -130,6 +130,7 @@ class EnsembleRunner():
             args.init_ckpt = adapter_ckpt
             ckpt_dir = os.path.dirname(adapter_ckpt)
             args_cfg_files = glob.glob(f'{ckpt_dir}/args_*.yaml')
+            logging.warning(f"ARGFILES: {args_cfg_files}")
             args_cfg_files.sort(key=lambda x: os.path.getmtime(x))
             with open(args_cfg_files[-1], 'r') as file:
                 args_cfg = yaml.load(file, Loader=yaml.FullLoader)
@@ -526,7 +527,7 @@ class EnsembleRunner():
         batch_ids = []
         # records = defaultdict(list)
         records = defaultdict(lambda: defaultdict(list))
-        torch.set_num_threads(32)
+        # torch.set_num_threads(32)
         # results = self.parallel_monkey(dataloader, split, evaluate_steps, records, batch_ids)
         dtwDs = DtwDataset(dataloader, self.upstreams, self.downstreams, self.featurizers, self.real_downstream, split, records, self.args)
         dtwLoader = torch.utils.data.DataLoader(dtwDs, batch_size=1, shuffle=False, num_workers=16, collate_fn=lambda x: x, pin_memory=True)
@@ -846,10 +847,10 @@ class EnsembleRunner():
                         blank_id += 1
                     max_id = e
             
-            new_blank1 = sorted(list(set(new_blank1)))
+            new_blank1 = sorted(list(set(new_blank1 + new_blank2)))
             new_blank2 = sorted(list(set(new_blank2)))
-            new_blank1 = torch.tensor(new_blank1)
-            new_blank2 = torch.tensor(new_blank2)
+            new_blank1 = torch.LongTensor(new_blank1)
+            new_blank2 = torch.LongTensor(new_blank2)
         logging.warning(f"{new_blank1}")
         logging.warning(f"{new_blank2}")
         return (s1[ret1] + s2[ret2]) / 2, ret1, ret2, dp[-1][-1], new_blank1, new_blank2
@@ -1403,13 +1404,16 @@ class DtwDataset(torch.utils.data.Dataset):
         self.featurizers = featureizers
         self.real_downstream = real_downstream
         self.split = split
-        self.ens_algo = "vote"
+        self.ens_algo = "dtw"
         self.batch_ids = []
         self.wavs = []
         self.others = []
         self.records = records
         self.stacked_log_probs = []
         for batch_id, (wavs, *others) in enumerate(loader):
+            # # HACK
+            # if batch_id > 5:
+            #     break
             # logging.warning(f"others: {(others)}, {len(others[0][0])}, {len(others[1][0])}")
             self.batch_ids.append(batch_id)
             self.wavs.extend(wavs)
@@ -1434,11 +1438,82 @@ class DtwDataset(torch.utils.data.Dataset):
                 all_log_probs = torch.stack(all_log_probs, dim=0)  # 3 * N * T * C
                 self.stacked_log_probs.extend(all_log_probs.transpose(0, 1).cpu())
         # [(2*b), (2*b)] -> [2 * B]
+       
         self.others = list(zip(*self.others))
+        
         # [(b,b,b,b), (b,b,b,b)]
-        self.others = [list(itertools.chain.from_iterable(_other)) for _other in self.others]
+        logging.warning(f"{self.others[-1]}")
+        self.others = [list(itertools.chain.from_iterable((_other if not isinstance(_other[0], str) else [_other]))) for _other in self.others]
         # self.others = [np.concatenate(_other) for _other in self.others]
         logging.warning(f"Len: {len(self.stacked_log_probs)} | {len(self.wavs)} | {len(self.others)}")
+        logging.warning(f"{self.others[-1]}")
+
+
+    @staticmethod
+    def comp_clusters(clus1: List, clus2: List) -> Dict[str, Any]:
+        best_results = {"score": torch.inf}
+        for _i, _j in itertools.product(range(len(clus1)), range(len(clus2))):
+            results = DtwDataset.compare_sequence(clus1[_i].seq, clus2[_j].seq, use_monkey=True, blank1=clus1[_i].blank, blank2=clus2[_j].blank)
+            aligned_seq, aln1, aln2, score, *ret = results
+            if score < best_results["score"]:
+                best_results = {
+                    "score": score,
+                    "aln1": aln1,
+                    "aln2": aln2,
+                    "aligned_seq": aligned_seq,
+                    "blank1": ret[0],
+                    "blank2": ret[1],
+                    "seq_i": _i,
+                    "seq_j": _j
+                }
+                
+        return best_results
+        
+
+
+    @staticmethod
+    def merge_advance(seqs, blank_prob=-1, algo=" ", pad_idx=-1) -> List[torch.Tensor]:
+        processed_idx = 1
+        blanks = [[] for _ in range(len(seqs))]
+        for _sid, _seq in enumerate(seqs):
+            soft_seq = torch.nn.functional.softmax(_seq, dim=-1)
+            log_seq = torch.nn.functional.log_softmax(_seq, dim=-1)
+            if algo == "rover":
+                soft_seq = torch.argmax(soft_seq, dim=-1)
+            if blank_prob >= 0:
+                black_probs = soft_seq[:, pad_idx]
+                logging.warning(f"{torch.sort(black_probs, descending=True)[0][:10]}")
+                # filter idx that blank prob > 0.97
+                high_prob_blank_idx = (soft_seq[:, pad_idx] < blank_prob)
+                logging.warning(f"{torch.sum(~high_prob_blank_idx)}")
+                blanks[_sid] = EnsembleRunner.parse_blank_pos(high_prob_blank_idx)
+                logging.warning(f"{blanks[_sid]}")
+                seqs[_sid] = soft_seq[high_prob_blank_idx]
+            else:
+                seqs[_sid] = soft_seq
+        clusters = [[SeqBlank(_seq, _blank)] for _seq, _blank in zip(seqs, blanks)]
+        while len(clusters) > 1:
+            logging.warning(f"Processing {len(clusters)} clusters")
+            best_results = {"score": torch.inf}
+            for _i, _j in itertools.combinations(range(len(clusters)), 2):
+                results = DtwDataset.comp_clusters(clusters[_i], clusters[_j])
+                if results["score"] < best_results["score"]:
+                    best_results = results
+                    best_results.update({"cluster_i": _i, "cluster_j": _j})
+            logging.warning(f"Best results: {best_results['cluster_i']} | {best_results['seq_i']}, {best_results['cluster_j']} | {best_results['seq_j']}")
+            for _seqblank in clusters[best_results["cluster_i"]]:
+                # logging.warning(f"Cluster {_seq.seq.shape}")
+                _seqblank.seq = _seqblank.seq[best_results["aln1"]]
+                _seqblank.blank = best_results["blank1"]
+            for _seqblank in clusters[best_results["cluster_j"]]:
+                _seqblank.seq = _seqblank.seq[best_results["aln2"]]
+                _seqblank.blank = best_results["blank2"]
+            
+            clusters[best_results["cluster_i"]] = clusters[best_results["cluster_i"]] + clusters[best_results["cluster_j"]]
+            del clusters[best_results["cluster_j"]]
+        
+        return [_seqblank.seq for _seqblank in clusters[0]]
+
 
     @staticmethod
     def merge_all(seqs, blank_prob=-1, algo=" ", pad_idx=-1) -> List[torch.Tensor]:
@@ -1465,7 +1540,7 @@ class DtwDataset(torch.utils.data.Dataset):
         while ((processed_idx) < len(seqs)):
             logging.warn(f"processing {processed_idx}")
             if algo == "dtw":
-                aligned_seq, aln1, aln2, score, *ret = DtwDataset.compare_sequence(copied_seqs[-1], seqs[processed_idx], copied_blanks[-1], blanks[processed_idx])
+                aligned_seq, aln1, aln2, score, *ret = DtwDataset.compare_sequence(copied_seqs[-1], seqs[processed_idx], copied_blanks[-1], blanks[processed_idx], use_monkey=True)
                 for i, _seq in enumerate(copied_seqs):
                     copied_seqs[i] = _seq[aln1]
                     copied_blanks[i] = ret[0]
@@ -1483,7 +1558,7 @@ class DtwDataset(torch.utils.data.Dataset):
             
 
         logging.warning(copied_blanks[-1])
-        if blank_prob >= 0:
+        if blank_prob >= 0 and False:
             for _i, _seq in enumerate(copied_seqs):
                 new_seq = []
                 _blank_id = 0
@@ -1544,8 +1619,12 @@ class DtwDataset(torch.utils.data.Dataset):
             ret1.append(0)
             ret2.append(0)
         else:
-            _dtw = SoftDTW(use_cuda=True)
-            _res = _dtw(torch.from_numpy(s1).unsqueeze(0), torch.from_numpy(s2).unsqueeze(0))[0, 1:-1, 1:-1]
+            _dtw = SoftDTW(use_cuda=False)
+            s1 = torch.from_numpy(s1)
+            s2 = torch.from_numpy(s2)
+            _res = _dtw.forward(s1.unsqueeze(0), s2.unsqueeze(0))
+            logging.warning(f"{_res.shape}")
+            _res = _res.squeeze(0)[1:-1, 1:-1]
             ret1, ret2 = [], []
             nx, ny = t1 - 1, t2 - 1
             while(nx > 0 or ny > 0):
@@ -1571,7 +1650,7 @@ class DtwDataset(torch.utils.data.Dataset):
         logging.warning(ret1)
         logging.warning(ret2)
         new_blank1, new_blank2 = [], []
-        if blank1 and blank2:
+        if blank1 is not None and blank2 is not None:
             max_id = -1
             blank_id = 0
             for _i, e in enumerate(ret1):
@@ -1594,10 +1673,10 @@ class DtwDataset(torch.utils.data.Dataset):
                         blank_id += 1
                     max_id = e
             
-            new_blank1 = sorted(list(set(new_blank1)))
+            new_blank1 = sorted(list(set(new_blank1 + new_blank2)))
             new_blank2 = sorted(list(set(new_blank2)))
-            new_blank1 = torch.tensor(new_blank1)
-            new_blank2 = torch.tensor(new_blank2)
+            new_blank1 = torch.LongTensor(new_blank1)
+            new_blank2 = torch.LongTensor(new_blank2)
         logging.warning(f"{new_blank1}")
         logging.warning(f"{new_blank2}")
         return (s1[ret1] + s2[ret2]) / 2, ret1, ret2, dp[-1][-1], new_blank1, new_blank2
@@ -1610,18 +1689,37 @@ class DtwDataset(torch.utils.data.Dataset):
             all_log_probs: torch.Tensor = self.stacked_log_probs[index]  # 3 * N * T * C
             
             if self.ens_algo == "dtw":
-                merged_seqs = DtwDataset.merge_all(list(all_log_probs), algo=self.ens_algo)  # 3 * T * C
+                # merged_seqs = DtwDataset.merge_all(list(all_log_probs), blank_prob=0.97, algo=self.ens_algo, pad_idx=self.real_downstream.model.tokenizer.pad_idx)  # 3 * T * C
+                _pad_idx = self.real_downstream.model.tokenizer.pad_idx \
+                    if getattr(self.real_downstream.model, "tokenizer", None) is not None \
+                        else self.real_downstream.model.blank
+                merged_seqs = DtwDataset.merge_all(list(all_log_probs), blank_prob=0.99, algo=self.ens_algo, pad_idx=_pad_idx)  # 3 * T * C
+                # DTW + Vote
+                '''
+                voter = (torch.stack(merged_seqs)) # 3 * T * C
+                num_classes = voter.shape[-1]
+                voted = torch.mode(voter.argmax(-1), dim=0)[0] # T
+                assert (voted.all() < num_classes), f"Fuck voted: {voted}, num_classes: {num_classes}"
+                try: 
+                    logging.warning(f"Votes: {voter.argmax(-1)}, {voter.shape}")
+                    one_hot = torch.nn.functional.one_hot((voted), num_classes=num_classes).float() # T * C
+                except:
+                    logging.warning(f"voted: {voted}, num_classes: {num_classes}")
+                    raise
+                merged_seqs = [one_hot for _ in range(len(all_log_probs))]
+                '''
+                
             elif self.ens_algo == "avg":
                 merged_seqs = [_prob for _prob in all_log_probs]
             elif self.ens_algo == "vote":
                 voter = (all_log_probs) # 3 * T * C
                 num_classes = voter.shape[-1]
-                voted = scipy.stats.mode(voter.argmax(-1), axis=0, keepdims=False)[0] # T
-                assert (voted < num_classes), f"voted: {voted}, num_classes: {num_classes}"
+                voted = torch.mode(voter.argmax(-1), dim=0)[0] # T
+                assert (voted.all() < num_classes), f"Fuck voted: {voted}, num_classes: {num_classes}"
                 try: 
                     
-                    logging.warning(f"Votes: {voter.argmax(-1)}")
-                    one_hot = torch.nn.functional.one_hot(torch.LongTensor(voted), num_classes=num_classes).float() # T * C
+                    logging.warning(f"Votes: {voter.argmax(-1)}, {voter.shape}")
+                    one_hot = torch.nn.functional.one_hot((voted), num_classes=num_classes).float() # T * C
                 except:
                     logging.warning(f"voted: {voted}, num_classes: {num_classes}")
                     raise
@@ -1634,3 +1732,8 @@ class DtwDataset(torch.utils.data.Dataset):
         return len(self.wavs)        
 
 
+class SeqBlank:
+    def __init__(self, seq, blank) -> None:
+        self.seq: torch.Tensor = seq
+        self.blank: torch.Tensor = blank
+        
